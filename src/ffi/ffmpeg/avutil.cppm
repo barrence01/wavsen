@@ -98,6 +98,7 @@ export {
     using ::AVMEDIA_TYPE_VIDEO;
 
     using ::AV_PIX_FMT_NONE;
+    using ::AV_PIX_FMT_BGRA;
     using ::AV_PIX_FMT_NV12;
     using ::AV_PIX_FMT_RGBA;
     using ::AV_PIX_FMT_VULKAN;

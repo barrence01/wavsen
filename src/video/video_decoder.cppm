@@ -120,6 +120,9 @@ enum class HwAccel
     Vulkan = 1,
     Vaapi  = 2,
     None   = 3,
+    // The value is part of the cross-platform option ABI; the implementation
+    // reports it unavailable on non-Apple targets.
+    VideoToolbox = 4,
 };
 
 struct OpenOpts {
@@ -154,6 +157,7 @@ enum class FrameKind
     Sw           = 0,
     VulkanShared = 1,
     VaapiDrm     = 2,
+    VideoToolbox = 3,
 };
 
 struct DrmPlane {
@@ -266,6 +270,51 @@ struct VaapiFramePull {
     Option<VaapiFrameLease> frame;
 };
 
+// Apple VideoToolbox exposes decoded frames as CVPixelBuffer/IOSurface
+// objects. Keep the public module ABI opaque so the rest of wavsen and the
+// Linux build do not depend on CoreVideo or Objective-C types.
+struct AppleVideoFrameView {
+    void* pixel_buffer { nullptr };
+    void* io_surface { nullptr };
+    u32   width {};
+    u32   height {};
+    u32   pixel_format {};
+    u32   plane_count {};
+    f64   pts_seconds { -1.0 };
+    u32   colorspace {};
+    u32   color_range {};
+};
+
+class AppleFrameLease {
+public:
+    AppleFrameLease(const AppleFrameLease&)            = delete;
+    AppleFrameLease& operator=(const AppleFrameLease&) = delete;
+    AppleFrameLease(AppleFrameLease&& other) noexcept;
+    AppleFrameLease& operator=(AppleFrameLease&& other) noexcept;
+    ~AppleFrameLease();
+
+    const AppleVideoFrameView& view() const noexcept { return view_; }
+    bool                       valid() const noexcept { return state_ != nullptr; }
+
+    struct State;
+
+private:
+    friend class VideoDecoder;
+
+    AppleFrameLease(State* state, AppleVideoFrameView view) noexcept
+        : state_(state), view_(rstd::move(view)) {}
+
+    void reset() noexcept;
+
+    State*              state_ { nullptr };
+    AppleVideoFrameView view_;
+};
+
+struct AppleFramePull {
+    NextFrame               status { NextFrame::Ok };
+    Option<AppleFrameLease> frame;
+};
+
 struct DrmFramePull {
     NextFrame             status { NextFrame::Ok };
     Option<DrmFrameLease> frame;
@@ -293,6 +342,7 @@ public:
     auto next_frame(Nv12Frame& out) -> Result<NextFrame, Error>;
     auto next_vk_frame() -> Result<VkFramePull, Error>;
     auto next_vaapi_frame() -> Result<VaapiFramePull, Error>;
+    auto next_apple_frame() -> Result<AppleFramePull, Error>;
     auto next_drm_frame() -> Result<DrmFramePull, Error>;
     auto seek(f64 seconds) -> Result<empty, Error>;
     auto duration() const -> Option<f64>;
@@ -334,6 +384,12 @@ private:
     int next_frame_(Nv12Frame& out, Error* err);
     int next_vk_frame_(VkFrameInfo& out, Error* err);
     int next_vaapi_frame_(VaapiFrameView& out, Error* err);
+    int next_apple_frame_(AppleVideoFrameView& out, Error* err);
+#if defined(__APPLE__)
+    auto next_apple_frame_sync() -> Result<AppleFramePull, Error>;
+    void start_apple_prefetch();
+    void stop_apple_prefetch();
+#endif
 
     StateOwner state_;
     u32        target_width_ {};
@@ -341,5 +397,21 @@ private:
     bool       loop_ { false };
     FrameKind  kind_ { FrameKind::Sw };
 };
+
+} // namespace wavsen::video
+
+export namespace wavsen::video
+{
+
+// Creates a retained Metal BGRA texture from a VideoToolbox frame. The
+// returned handle is opaque and released with release_apple_video_metal_texture.
+// When reusable_metal_texture is a compatible texture returned by a previous
+// call, the conversion writes into it and returns the same owned handle. The
+// caller must keep that handle alive until the GPU work using it has retired.
+auto create_apple_video_metal_texture(const AppleFrameLease&, void* metal_device)
+    -> Result<void*, Error>;
+auto create_apple_video_metal_texture(const AppleFrameLease&, void* metal_device,
+                                      void* reusable_metal_texture) -> Result<void*, Error>;
+void release_apple_video_metal_texture(void* metal_texture);
 
 } // namespace wavsen::video

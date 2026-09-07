@@ -6,8 +6,47 @@ version = "0.1.0"
 name = "wavsen"
 module = "wavsen"
 archive = "wavsen"
+sources = [
+  "src/lib.cppm",
+  "src/decode/mod.cppm",
+  "src/decode/mod.cpp",
+  "src/video/mod.cppm",
+  "src/video/presenter.cppm",
+  "src/video/video_decoder.cppm",
+  "src/video/video_decoder.cpp",
+  "src/video/vk_device.cppm",
+  "src/video/vk_device.cpp",
+  "src/video/yuv_to_rgba.cppm",
+  "src/video/yuv_to_rgba.cpp",
+  "src/audio/av_sync.cppm",
+  "src/audio/av_sync.cpp",
+  "src/audio/byte_stream.cppm",
+  "src/audio/capture.cppm",
+  "src/audio/capture_window.cppm",
+  "src/audio/core.cppm",
+  "src/audio/file.cppm",
+  "src/audio/file.cpp",
+  "src/audio/gain.cppm",
+  "src/audio/mixer.cppm",
+  "src/audio/mixer.cpp",
+  "src/audio/mod.cppm",
+  "src/audio/mod.cpp",
+  "src/ffi/ffmpeg/avcodec.cppm",
+  "src/ffi/ffmpeg/avformat.cppm",
+  "src/ffi/ffmpeg/avutil.cppm",
+  "src/ffi/ffmpeg/mod.cppm",
+  "src/ffi/ffmpeg/swresample.cppm",
+  "src/ffi/ffmpeg/swscale.cppm",
+]
+when = [
+  { condition = 'target.os == "macos"', source-groups = ["macos-audio-capture"] },
+  { condition = 'target.os != "macos"', source-groups = ["portable-audio-capture"] },
+]
 
-[usage]
+[[when]]
+condition = 'target.os != "macos"'
+
+[when.usage]
 public-definitions = ["WAVSEN_HAS_VAAPI=1"]
 
 [dependencies.rstd-core]
@@ -60,15 +99,18 @@ pub = true
 [external-dependencies.pkg-config.libva]
 module = "libva"
 pub = true
+condition = 'target.os != "macos"'
 
 [external-dependencies.pkg-config.libva-drm]
 module = "libva-drm"
 pub = true
+condition = 'target.os != "macos"'
 
 [external-dependencies.pkg-config.libpulse]
 module = "libpulse"
 version = ">= 14.0"
 usage = "compile"
+condition = 'target.os != "macos"'
 
 [external-sources.wavsen-shader]
 path = "shaders"
@@ -77,3 +119,27 @@ path = "shaders"
 package = "WavsenShader"
 source = "wavsen-shader"
 targets = [{ name = "WavsenShader::nv12_to_rgba" }]
+
+[source-groups.portable-audio-capture]
+sources = ["src/audio/capture.cpp"]
+
+[source-groups.macos-audio-capture]
+sources = ["src/audio/audio_capture_coreaudio.cpp"]
+
+[external-sources.wavsen-apple-audio]
+path = "src/audio"
+
+[external-dependencies.cmake.wavsen-apple-audio]
+package = "WavsenAppleAudio"
+source = "wavsen-apple-audio"
+condition = 'target.os == "macos"'
+targets = [{ name = "WavsenAppleAudio::capture" }]
+
+[external-sources.wavsen-apple-bridge]
+path = "src/video"
+
+[external-dependencies.cmake.wavsen-apple-bridge]
+package = "WavsenAppleBridge"
+source = "wavsen-apple-bridge"
+condition = 'target.os == "macos"'
+targets = [{ name = "WavsenAppleBridge::bridge" }]
