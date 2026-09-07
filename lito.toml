@@ -11,67 +11,64 @@ archive = "wavsen"
 public-definitions = ["WAVSEN_HAS_VAAPI=1"]
 
 [dependencies.rstd-core]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "public"
+version = "0.1.0"
+pub = true
 
 [dependencies.rstd-std]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "public"
+version = "0.1.0"
+pub = true
 
 [dependencies.rstd-cppstd]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "public"
+version = "0.1.0"
+pub = true
 
 [dependencies.rstd-log]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "private"
+version = "0.1.0"
 
 [dependencies.rstd-dlopn]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "private"
+version = "0.1.0"
 
 [dependencies.vvk]
 git = "https://github.com/litocpp/vvk.git"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libavformat]
 module = "libavformat"
 version = ">= 58"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libavcodec]
 module = "libavcodec"
 version = ">= 58"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libavutil]
 module = "libavutil"
 version = ">= 56"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libswscale]
 module = "libswscale"
 version = ">= 5"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libswresample]
 module = "libswresample"
 version = ">= 3"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libva]
 module = "libva"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libva-drm]
 module = "libva-drm"
-visibility = "public"
+pub = true
 
 [external-dependencies.pkg-config.libpulse]
 module = "libpulse"
 version = ">= 14.0"
 usage = "compile"
-visibility = "private"
 
 [external-sources.wavsen-shader]
 path = "shaders"
@@ -79,4 +76,4 @@ path = "shaders"
 [external-dependencies.cmake.wavsen-shader]
 package = "WavsenShader"
 source = "wavsen-shader"
-targets = [{ name = "WavsenShader::nv12_to_rgba", visibility = "private" }]
+targets = [{ name = "WavsenShader::nv12_to_rgba" }]
