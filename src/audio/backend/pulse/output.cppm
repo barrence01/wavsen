@@ -1,4 +1,4 @@
-export module wavsen.audio.backend.pulse_output;
+export module wavsen.audio.backend.pulse.output;
 export import wavsen.audio.backend;
 import rstd;
 using namespace rstd::prelude;

@@ -5,10 +5,10 @@ import rstd.log;
 import wavsen.audio.capture_window;
 import wavsen.audio.backend;
 #if defined(__APPLE__)
-import wavsen.audio.backend.coreaudio_capture;
+import wavsen.audio.backend.coreaudio.capture;
 using NativeCapture = wavsen::audio::backend::CoreAudioCapture;
 #else
-import wavsen.audio.backend.pulse_capture;
+import wavsen.audio.backend.pulse.capture;
 using NativeCapture = wavsen::audio::backend::PulseCapture;
 #endif
 

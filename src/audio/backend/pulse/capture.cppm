@@ -1,4 +1,4 @@
-export module wavsen.audio.backend.pulse_capture;
+export module wavsen.audio.backend.pulse.capture;
 
 export import wavsen.audio.backend;
 import rstd;

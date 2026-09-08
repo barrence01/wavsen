@@ -1,4 +1,4 @@
-export module wavsen.audio.backend.coreaudio_capture;
+export module wavsen.audio.backend.coreaudio.capture;
 
 export import wavsen.audio.backend;
 import rstd;

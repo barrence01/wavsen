@@ -5,10 +5,10 @@ import rstd.log;
 import wavsen.audio.gain;
 import wavsen.audio.backend;
 #if defined(__APPLE__)
-import wavsen.audio.backend.coreaudio_output;
+import wavsen.audio.backend.coreaudio.output;
 using NativeOutput = wavsen::audio::backend::CoreAudioOutput;
 #else
-import wavsen.audio.backend.pulse_output;
+import wavsen.audio.backend.pulse.output;
 using NativeOutput = wavsen::audio::backend::PulseOutput;
 #endif
 

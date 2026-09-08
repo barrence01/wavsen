@@ -1,4 +1,4 @@
-module wavsen.audio.backend.coreaudio_output;
+module wavsen.audio.backend.coreaudio.output;
 import rstd;
 import wavsen.ffi.coreaudio;
 

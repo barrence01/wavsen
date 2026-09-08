@@ -1,7 +1,7 @@
 module;
 #include "process_tap.hpp"
 
-module wavsen.audio.backend.coreaudio_capture;
+module wavsen.audio.backend.coreaudio.capture;
 import rstd;
 import wavsen.ffi.coreaudio;
 

@@ -1,4 +1,4 @@
-module wavsen.audio.backend.pulse_capture;
+module wavsen.audio.backend.pulse.capture;
 
 import rstd;
 import rstd.log;
