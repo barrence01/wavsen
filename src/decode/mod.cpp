@@ -140,7 +140,7 @@ auto extract_thumbnail(ref<str> path, const ThumbOptions& opts) -> Result<RgbaIm
     if (fmt->duration > 0) {
         duration_sec = f64(static_cast<double>(fmt->duration) / AV_TIME_BASE);
     } else if (st->duration > 0 && st->time_base.den > 0) {
-        duration_sec = f64(static_cast<double>(st->duration) * ffi::av_q2d(st->time_base));
+        duration_sec = f64(static_cast<double>(st->duration) * ffi::ffmpeg::av_q2d(st->time_base));
     }
     if (duration_sec > f64(0.5)) {
         f64 target_sec = opts.seek_seconds.max(duration_sec * opts.seek_fraction);

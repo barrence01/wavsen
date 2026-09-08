@@ -172,13 +172,13 @@ export {
     // (different qualified name → no redeclaration), out-of-line so the
     // `::av_q2d` call resolves in this module's TU and importers reach it
     // via a real symbol rather than inline expansion.
-    namespace ffi
+    namespace wavsen::ffi::ffmpeg
     {
     double av_q2d(AVRational a) noexcept;
     }
 }
 
-namespace ffi
+namespace wavsen::ffi::ffmpeg
 {
 double av_q2d(AVRational a) noexcept { return ::av_q2d(a); }
-} // namespace ffi
+} // namespace wavsen::ffi::ffmpeg

@@ -1251,9 +1251,10 @@ int VideoDecoder::next_vk_frame_(VkFrameInfo& out, Error* err) {
             const rstd::int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                           ? st.src_frame->best_effort_timestamp
                                           : st.src_frame->pts;
-            out.pts_seconds = pts == AV_NOPTS_VALUE
-                                  ? f64(-1.0)
-                                  : f64(static_cast<double>(pts) * ffi::av_q2d(st.stream_tb));
+            out.pts_seconds =
+                pts == AV_NOPTS_VALUE
+                    ? f64(-1.0)
+                    : f64(static_cast<double>(pts) * ffi::ffmpeg::av_q2d(st.stream_tb));
             return looped ? 2 : 0;
         }
         if (rc == AVERROR_EOF) {
@@ -1330,9 +1331,10 @@ int VideoDecoder::next_vaapi_frame_(VaapiFrameView& out, Error* err) {
             const rstd::int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                           ? st.src_frame->best_effort_timestamp
                                           : st.src_frame->pts;
-            out.pts_seconds = pts == AV_NOPTS_VALUE
-                                  ? f64(-1.0)
-                                  : f64(static_cast<double>(pts) * ffi::av_q2d(st.stream_tb));
+            out.pts_seconds =
+                pts == AV_NOPTS_VALUE
+                    ? f64(-1.0)
+                    : f64(static_cast<double>(pts) * ffi::ffmpeg::av_q2d(st.stream_tb));
             return looped ? 2 : 0;
         }
         if (rc == AVERROR_EOF) {
@@ -1402,9 +1404,10 @@ int VideoDecoder::next_apple_frame_(AppleVideoFrameView& out, Error* err) {
             const rstd::int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                           ? st.src_frame->best_effort_timestamp
                                           : st.src_frame->pts;
-            out.pts_seconds = pts == AV_NOPTS_VALUE
-                                  ? f64(-1.0)
-                                  : f64(static_cast<double>(pts) * ffi::av_q2d(st.stream_tb));
+            out.pts_seconds =
+                pts == AV_NOPTS_VALUE
+                    ? f64(-1.0)
+                    : f64(static_cast<double>(pts) * ffi::ffmpeg::av_q2d(st.stream_tb));
             return looped ? 2 : 0;
         }
         if (rc == AVERROR_EOF) {
@@ -1523,9 +1526,10 @@ int VideoDecoder::next_frame_(Nv12Frame& out, Error* err) {
             const rstd::int64_t pts = (feed->best_effort_timestamp != AV_NOPTS_VALUE)
                                           ? feed->best_effort_timestamp
                                           : feed->pts;
-            out.pts_seconds = pts == AV_NOPTS_VALUE
-                                  ? f64(-1.0)
-                                  : f64(static_cast<double>(pts) * ffi::av_q2d(st.stream_tb));
+            out.pts_seconds =
+                pts == AV_NOPTS_VALUE
+                    ? f64(-1.0)
+                    : f64(static_cast<double>(pts) * ffi::ffmpeg::av_q2d(st.stream_tb));
             out.colorspace  = map_colorspace(feed->colorspace);
             out.color_range = map_range(feed->color_range);
             av_frame_unref(st.src_frame.get());
@@ -1776,7 +1780,7 @@ auto VideoDecoder::seek(f64 seconds) -> Result<empty, Error> {
     State& st    = *state_;
     auto   limit = duration();
     if (limit.is_some()) seconds = seconds.min(*limit);
-    const double time_base = ffi::av_q2d(st.stream_tb);
+    const double time_base = ffi::ffmpeg::av_q2d(st.stream_tb);
     if (time_base <= 0.0) {
         return Err(Error("video stream has an invalid time base"_str));
     }
@@ -1803,7 +1807,8 @@ auto VideoDecoder::duration() const -> Option<f64> {
     }
     const auto* stream = st.fmt->streams[st.video_idx];
     if (stream->duration <= 0) return None();
-    return Some(f64(static_cast<double>(stream->duration) * ffi::av_q2d(stream->time_base)));
+    return Some(
+        f64(static_cast<double>(stream->duration) * ffi::ffmpeg::av_q2d(stream->time_base)));
 }
 
 } // namespace wavsen::video

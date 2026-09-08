@@ -215,7 +215,8 @@ public:
         if (! fmt_ctx_ || stream_idx_ < 0) return false;
         const AVStream* st = fmt_ctx_->streams[stream_idx_];
         const auto      tb = st->time_base;
-        const auto      ts = static_cast<rstd::int64_t>(seconds.to_primitive() / ffi::av_q2d(tb));
+        const auto      ts =
+            static_cast<rstd::int64_t>(seconds.to_primitive() / ffi::ffmpeg::av_q2d(tb));
         if (av_seek_frame(fmt_ctx_, stream_idx_, ts, AVSEEK_FLAG_BACKWARD) < 0) {
             rstd::log::warn("wavsen::audio: av_seek_frame failed");
             return false;
@@ -246,8 +247,9 @@ private:
                                      ? frame_->best_effort_timestamp
                                      : frame_->pts;
                 if (pts != AV_NOPTS_VALUE && fmt_ctx_ && stream_idx_ >= 0) {
-                    last_pts_seconds_ = f64(static_cast<double>(pts) *
-                                            ffi::av_q2d(fmt_ctx_->streams[stream_idx_]->time_base));
+                    last_pts_seconds_ =
+                        f64(static_cast<double>(pts) *
+                            ffi::ffmpeg::av_q2d(fmt_ctx_->streams[stream_idx_]->time_base));
                 }
                 return true;
             }

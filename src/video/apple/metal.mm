@@ -4,8 +4,8 @@
 #include <Foundation/NSString.h>
 #include "nv12_to_bgra.metal.h"
 
-import rstd;
-using namespace rstd::prelude;
+#include <memory>
+#include <new>
 
 void SetError(const char*& output, const char* message) { output = message; }
 
@@ -206,10 +206,12 @@ id<MTLTexture> CreateBgraTextureFromNv12(id<MTLDevice> device, WavsenMetalAdapte
 }
 
 const char* wavsen_metal_create(void* device, WavsenMetalAdapter** out) {
+    if (! out) return "metal adapter output is null";
     *out = nullptr;
     if (! device) return "metal device is null";
     @autoreleasepool {
-        auto state           = Box<WavsenMetalAdapter>::make();
+        auto state = std::unique_ptr<WavsenMetalAdapter>(new (std::nothrow) WavsenMetalAdapter);
+        if (! state) return "cannot allocate metal adapter";
         state->device        = [(id<MTLDevice>)device retain];
         state->command_queue = [state->device newCommandQueue];
         if (! state->command_queue) return "cannot create metal command queue";
@@ -217,24 +219,14 @@ const char* wavsen_metal_create(void* device, WavsenMetalAdapter** out) {
                 kCFAllocatorDefault, nullptr, state->device, nullptr, &state->texture_cache) !=
             kCVReturnSuccess)
             return "cannot create corevideo metal texture cache";
-        *out = rstd::move(state).into_raw().as_raw_ptr();
+        *out = state.release();
         return nullptr;
     }
 }
 
-void wavsen_metal_destroy(WavsenMetalAdapter* adapter) {
-    if (adapter) {
-        auto owned =
-            Box<WavsenMetalAdapter>::from_raw(mut_ptr<WavsenMetalAdapter>::from_raw_parts(adapter));
-    }
-}
+void wavsen_metal_destroy(WavsenMetalAdapter* adapter) { delete adapter; }
 
-void wavsen_metal_texture_destroy(WavsenMetalTexture* texture) {
-    if (texture) {
-        auto owned =
-            Box<WavsenMetalTexture>::from_raw(mut_ptr<WavsenMetalTexture>::from_raw_parts(texture));
-    }
-}
+void wavsen_metal_texture_destroy(WavsenMetalTexture* texture) { delete texture; }
 
 void* wavsen_metal_texture_handle(const WavsenMetalTexture* texture) {
     return texture ? static_cast<void*>(texture->texture) : nullptr;
@@ -249,7 +241,8 @@ const char* wavsen_metal_import(WavsenMetalAdapter* adapter, void* native_buffer
         auto height = CVPixelBufferGetHeight(buffer);
         auto format = CVPixelBufferGetPixelFormatType(buffer);
         if (! width || ! height) return "empty pixel buffer";
-        auto next = Box<WavsenMetalTexture>::make();
+        auto next = std::unique_ptr<WavsenMetalTexture>(new (std::nothrow) WavsenMetalTexture);
+        if (! next) return "cannot allocate metal texture";
         if (format == kCVPixelFormatType_32BGRA) {
             if (CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
                                                           adapter->texture_cache,
@@ -286,7 +279,7 @@ const char* wavsen_metal_import(WavsenMetalAdapter* adapter, void* native_buffer
             return "unsupported apple pixel format";
         }
         wavsen_metal_texture_destroy(*output);
-        *output = rstd::move(next).into_raw().as_raw_ptr();
+        *output = next.release();
         CVMetalTextureCacheFlush(adapter->texture_cache, 0);
         return nullptr;
     }
