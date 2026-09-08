@@ -4,6 +4,7 @@ module;
 
 module wavsen.video;
 
+import rstd.log;
 import rstd;
 import vvk;
 import :vk_device;
@@ -792,7 +793,14 @@ bool YuvToRgba::init(VkInstance instance, VkPhysicalDevice phys, VkDevice device
     const auto max_h_raw        = max_h.to_primitive();
 
     if (! device_dispatch_.vkGetSemaphoreFdKHR) {
+#if defined(__APPLE__)
+        // MoltenVK does not provide SYNC_FD export. The standalone viewer
+        // uses SampledLocal, so the fd-export path remains unused.
+        rstd::log::warn("YuvToRgba: vkGetSemaphoreFdKHR unavailable (macOS); "
+                        "BridgeForeign fd-export will be unavailable");
+#else
         return fail(err, "vkGetSemaphoreFdKHR missing"_str);
+#endif
     }
 
     // ----- Sampler (linear, clamp-to-edge) -----
@@ -979,15 +987,20 @@ bool YuvToRgba::init(VkInstance instance, VkPhysicalDevice phys, VkDevice device
         if (VkResult r = device_.CreateFence(fci, software_fence_); r != VK_SUCCESS)
             return fail(err, vk_error("vkCreateFence"_str, r));
 
+        VkSemaphoreCreateInfo sci {};
+        sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+#if defined(__APPLE__)
+        // MoltenVK rejects the Linux SYNC_FD export type. Keep a plain binary
+        // semaphore because Apple only uses the SampledLocal path here.
+        sci.pNext = nullptr;
+#else
         VkExportSemaphoreCreateInfo es {};
         es.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
         es.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-        VkSemaphoreCreateInfo sci {};
-        sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        sci.pNext = &es;
+        sci.pNext      = &es;
+#endif
         if (VkResult r = device_.CreateSemaphore(sci, software_export_semaphore_); r != VK_SUCCESS)
             return fail(err, vk_error("vkCreateSemaphore(signal)"_str, r));
-
         const auto generation = next_completion_generation();
         auto       timeline   = vvk::TimelineSemaphoreGeneration::Create(
             *device_,

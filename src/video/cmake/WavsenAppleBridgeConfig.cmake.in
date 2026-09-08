@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(PkgConfig)
+pkg_check_modules(WAVSEN_AVUTIL REQUIRED IMPORTED_TARGET libavutil>=56)
+
+include("${CMAKE_CURRENT_LIST_DIR}/WavsenAppleBridgeTargets.cmake")
+
+check_required_components(WavsenAppleBridge)

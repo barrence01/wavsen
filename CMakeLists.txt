@@ -10,17 +10,39 @@ pkg_check_modules(WAVSEN_SWRESAMPLE           IMPORTED_TARGET libswresample>=3)
 # against an FFmpeg compiled without --enable-vaapi.
 pkg_check_modules(WAVSEN_LIBVA                IMPORTED_TARGET libva libva-drm)
 
-set(WAVSEN_AUDIO_BACKEND "pulse" CACHE STRING
-    "Audio backend for wavsen::audio (pulse|pipewire)")
-set_property(CACHE WAVSEN_AUDIO_BACKEND PROPERTY STRINGS pulse pipewire)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
-if(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
+if(APPLE)
+    set(_wavsen_default_audio_backend "coreaudio")
+else()
+    set(_wavsen_default_audio_backend "pulse")
+endif()
+set(WAVSEN_AUDIO_BACKEND "${_wavsen_default_audio_backend}" CACHE STRING
+    "Audio backend for wavsen::audio (pulse|pipewire|coreaudio)")
+set_property(CACHE WAVSEN_AUDIO_BACKEND PROPERTY STRINGS pulse pipewire coreaudio)
+
+if(WAVSEN_AUDIO_BACKEND STREQUAL "coreaudio")
+    if(NOT APPLE)
+        message(FATAL_ERROR "WAVSEN_AUDIO_BACKEND=coreaudio is only available on Apple platforms")
+    endif()
+elseif(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
     pkg_check_modules(WAVSEN_LIBPULSE REQUIRED libpulse>=14.0)
 elseif(WAVSEN_AUDIO_BACKEND STREQUAL "pipewire")
     pkg_check_modules(WAVSEN_LIBPIPEWIRE REQUIRED libpipewire-0.3)
 else()
     message(FATAL_ERROR
-        "WAVSEN_AUDIO_BACKEND='${WAVSEN_AUDIO_BACKEND}' is not one of: pulse pipewire")
+        "WAVSEN_AUDIO_BACKEND='${WAVSEN_AUDIO_BACKEND}' is not one of: pulse pipewire coreaudio")
+endif()
+
+if(APPLE)
+    # Keep the Apple-only Objective-C++ implementation behind small C ABI
+    # bridge libraries. The module-bearing wavsen targets remain C++20-only.
+    add_subdirectory(src/video)
+    if(WAVSEN_AUDIO_BACKEND STREQUAL "coreaudio")
+        add_subdirectory(src/audio)
+    endif()
 endif()
 
 if(NOT TARGET vvk::vvk)
@@ -33,7 +55,12 @@ endif()
 # its own STATIC library so external consumers can pick & link them.
 # ---------------------------------------------------------------------------
 add_subdirectory(src/ffi/ffmpeg)
-if(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
+if(WAVSEN_AUDIO_BACKEND STREQUAL "coreaudio")
+    # CoreAudio is a system framework backend and does not need a wavsen FFI
+    # wrapper. The source is Objective-C++ because AudioQueue types are C APIs
+    # exposed by the Apple SDK and the host may also provide ObjC runtime flags.
+    set(_wavsen_audio_backend_target "")
+elseif(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
     add_subdirectory(src/ffi/pulse)
 else()
     add_subdirectory(src/ffi/pipewire)
@@ -90,6 +117,9 @@ target_link_libraries(wavsen_video
         rstd.log
         WavsenShader::nv12_to_rgba
 )
+if(APPLE)
+    target_link_libraries(wavsen_video PRIVATE WavsenAppleBridge::bridge)
+endif()
 set_property(TARGET wavsen_video PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_target_properties(wavsen_video PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
@@ -125,7 +155,12 @@ target_sources(wavsen_audio PRIVATE
     src/audio/av_sync.cpp
 )
 
-if(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
+if(WAVSEN_AUDIO_BACKEND STREQUAL "coreaudio")
+    target_sources(wavsen_audio PRIVATE
+        src/audio/mod.cpp
+        src/audio/audio_capture_coreaudio.cpp
+    )
+elseif(WAVSEN_AUDIO_BACKEND STREQUAL "pulse")
     target_sources(wavsen_audio PRIVATE
         src/audio/mod.cpp
         src/audio/capture.cpp
@@ -148,6 +183,14 @@ target_link_libraries(wavsen_audio
         rstd.log
         ${_wavsen_audio_backend_target}
 )
+if(WAVSEN_AUDIO_BACKEND STREQUAL "coreaudio")
+    target_link_libraries(wavsen_audio PRIVATE
+        WavsenAppleAudio::capture
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework CoreFoundation"
+    )
+endif()
 set_target_properties(wavsen_audio PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
 option(WAVSEN_BUILD_TESTS "Build wavsen test executables" OFF)

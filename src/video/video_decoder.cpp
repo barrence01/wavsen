@@ -1,3 +1,14 @@
+module;
+
+#if defined(__APPLE__)
+#    include "apple_video_bridge.hpp"
+#endif
+
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+
 module wavsen.video;
 
 import rstd;
@@ -184,6 +195,17 @@ String resolve_render_node(const Producer& producer, const OpenOpts& opts) {
     return node.is_some() ? rstd::move(node).unwrap() : String {};
 }
 
+const char* hw_accel_name(HwAccel accel) {
+    switch (accel) {
+    case HwAccel::Auto: return "auto";
+    case HwAccel::Vulkan: return "vulkan";
+    case HwAccel::Vaapi: return "vaapi";
+    case HwAccel::VideoToolbox: return "videotoolbox";
+    case HwAccel::None: return "none";
+    }
+    return "unknown";
+}
+
 /* Build an AV_HWDEVICE_TYPE_VULKAN context wrapping the caller's
  * Producer-owned VkInstance/VkDevice. Returns a populated AVBufferRef
  * on success, or null + populated *err on any failure. */
@@ -245,6 +267,66 @@ auto av_err_str(int rc) -> String {
     av_strerror(rc, buf, sizeof(buf));
     return String::make(rstd::cppstd::as_str(buf).unwrap());
 }
+
+#if defined(__APPLE__)
+AVPixelFormat get_format_prefer_videotoolbox(AVCodecContext* cctx, const AVPixelFormat* fmts) {
+    for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p != AV_PIX_FMT_VIDEOTOOLBOX) continue;
+
+        /* Ask FFmpeg's VideoToolbox hwcontext for a BGRA pixel-buffer pool.
+         * The modern AVHWDevice path uses sw_format here, not the old
+         * AVVideotoolboxContext hook. FFmpeg exposes BGRA as a full-range RGB
+         * surface; the source stream may be tagged as TV-range YUV, but that
+         * range is consumed before the RGB surface is created. Keep the
+         * original value for fallback and advertise RGB's full range while
+         * initializing this pool. This removes the synchronous Metal
+         * NV12->BGRA conversion from the render thread. */
+        const auto source_range = cctx->color_range;
+        cctx->color_range       = AVCOL_RANGE_JPEG;
+
+        AVBufferRef* hw_frames = nullptr;
+        const int    rc        = avcodec_get_hw_frames_parameters(
+            cctx, cctx->hw_device_ctx, AV_PIX_FMT_VIDEOTOOLBOX, &hw_frames);
+        if (rc < 0 || ! hw_frames) {
+            rstd::log::warn("get_format_prefer_videotoolbox: BGRA frame-pool preparation "
+                            "failed ({}); keeping VideoToolbox's default output format.",
+                            av_err_str(rc).as_str());
+            if (hw_frames) av_buffer_unref(&hw_frames);
+            cctx->color_range = source_range;
+            return AV_PIX_FMT_VIDEOTOOLBOX;
+        }
+
+        auto* fc       = reinterpret_cast<AVHWFramesContext*>(hw_frames->data);
+        fc->sw_format = AV_PIX_FMT_BGRA;
+        const int init_rc = av_hwframe_ctx_init(hw_frames);
+        if (init_rc < 0) {
+            rstd::log::warn("get_format_prefer_videotoolbox: BGRA frame-pool initialization "
+                            "failed ({}); keeping VideoToolbox's default output format.",
+                            av_err_str(init_rc).as_str());
+            av_buffer_unref(&hw_frames);
+            cctx->color_range = source_range;
+            return AV_PIX_FMT_VIDEOTOOLBOX;
+        }
+
+        if (cctx->hw_frames_ctx) av_buffer_unref(&cctx->hw_frames_ctx);
+        cctx->hw_frames_ctx = hw_frames;
+        rstd::log::info("get_format_prefer_videotoolbox: selected BGRA VideoToolbox frame pool.");
+        return AV_PIX_FMT_VIDEOTOOLBOX;
+    }
+    return AV_PIX_FMT_NONE;
+}
+
+AVBufferRef* make_videotoolbox_hwdevice(Error* err) {
+    AVBufferRef* hwd = nullptr;
+    char         error[512] = {};
+    if (! wavsen_apple_create_videotoolbox_device(&hwd, error, sizeof(error))) {
+        fail(err, rstd::cppstd::as_str(error).unwrap());
+        if (hwd) av_buffer_unref(&hwd);
+        return nullptr;
+    }
+    return hwd;
+}
+#endif
 
 u64 next_decoder_generation() {
     static Atomic<u64> next { u64(1) };
@@ -358,6 +440,14 @@ struct VaapiFrameLease::State {
     FramePtr source;
 };
 
+struct AppleFrameLease::State {
+#if defined(__APPLE__)
+    WavsenAppleVideoFrame frame;
+
+    ~State() { wavsen_apple_release_video_frame(&frame); }
+#endif
+};
+
 void DrmFrameLease::reset() noexcept {
     if (! state_) return;
     auto state = Box<State>::from_raw(mut_ptr<State>::from_raw_parts(state_));
@@ -401,6 +491,25 @@ VaapiFrameLease& VaapiFrameLease::operator=(VaapiFrameLease&& other) noexcept {
 }
 
 VaapiFrameLease::~VaapiFrameLease() { reset(); }
+
+void AppleFrameLease::reset() noexcept {
+    if (! state_) return;
+    auto state = Box<State>::from_raw(mut_ptr<State>::from_raw_parts(state_));
+    state_     = nullptr;
+}
+
+AppleFrameLease::AppleFrameLease(AppleFrameLease&& other) noexcept
+    : state_(rstd::exchange(other.state_, nullptr)), view_(rstd::move(other.view_)) {}
+
+AppleFrameLease& AppleFrameLease::operator=(AppleFrameLease&& other) noexcept {
+    if (this == &other) return *this;
+    reset();
+    state_ = rstd::exchange(other.state_, nullptr);
+    view_  = rstd::move(other.view_);
+    return *this;
+}
+
+AppleFrameLease::~AppleFrameLease() { reset(); }
 
 auto VaapiFrameLease::into_drm() && -> Result<DrmFrameLease, Error> {
     if (! state_) return Err(Error("into_drm called on invalid VAAPI frame lease"_str));
@@ -486,8 +595,25 @@ struct VideoDecoder::State {
     AVRational    stream_tb { 0, 1 };
     u64           decoder_generation;
     bool          flushing { false };
+#if defined(__APPLE__)
+    std::mutex                 apple_prefetch_mutex;
+    std::condition_variable    apple_prefetch_condition;
+    std::deque<AppleFramePull> apple_prefetch_frames;
+    std::thread                apple_prefetch_thread;
+    bool                       apple_prefetch_stop { false };
+    bool                       apple_prefetch_error { false };
+    String                     apple_prefetch_error_message;
+#endif
 
     ~State() {
+#if defined(__APPLE__)
+        {
+            std::lock_guard lock(apple_prefetch_mutex);
+            apple_prefetch_stop = true;
+        }
+        apple_prefetch_condition.notify_all();
+        if (apple_prefetch_thread.joinable()) apple_prefetch_thread.join();
+#endif
         /* Tear down libavformat first so it stops invoking our avio
          * callbacks. Then free the avio buffer + context. input_stream
          * is released last (implicit destruction) — it's still alive
@@ -626,15 +752,20 @@ auto VideoDecoder::open_with_vk(ref<str> path, u32 target_width, u32 target_heig
                                 const Producer& producer, const OpenOpts& opts)
     -> Result<Box<VideoDecoder>, Error> {
     auto render_node = resolve_render_node(producer, opts);
-    /* Resolve trial order. Auto = Vulkan first, then VAAPI; explicit
-     * single-mode skips the others; None goes straight to sw. */
-    HwAccel order[2] = { HwAccel::None, HwAccel::None };
+    /* Resolve trial order. On Apple, VideoToolbox is the first choice because
+     * MoltenVK generally does not expose Vulkan video decode queues. */
+    HwAccel order[3] = { HwAccel::None, HwAccel::None, HwAccel::None };
     int     n_order  = 0;
     switch (opts.hwaccel) {
     case HwAccel::Auto:
+#if defined(__APPLE__)
+        order[0] = HwAccel::VideoToolbox;
+        n_order  = 1;
+#else
         order[0] = HwAccel::Vulkan;
         order[1] = HwAccel::Vaapi;
         n_order  = 2;
+#endif
         break;
     case HwAccel::Vulkan:
         order[0] = HwAccel::Vulkan;
@@ -642,6 +773,10 @@ auto VideoDecoder::open_with_vk(ref<str> path, u32 target_width, u32 target_heig
         break;
     case HwAccel::Vaapi:
         order[0] = HwAccel::Vaapi;
+        n_order  = 1;
+        break;
+    case HwAccel::VideoToolbox:
+        order[0] = HwAccel::VideoToolbox;
         n_order  = 1;
         break;
     case HwAccel::None: n_order = 0; break;
@@ -661,10 +796,17 @@ auto VideoDecoder::open_with_vk(ref<str> path, u32 target_width, u32 target_heig
 #else
             local_err.message = String::make("wavsen built without VAAPI support"_str);
 #endif
+        } else if (order[i] == HwAccel::VideoToolbox) {
+#if defined(__APPLE__)
+            hwd  = make_videotoolbox_hwdevice(&local_err);
+            kind = FrameKind::VideoToolbox;
+#else
+            local_err.message = String::make("VideoToolbox is only available on Apple platforms"_str);
+#endif
         }
         if (! hwd) {
             rstd::log::info("VideoDecoder: hwaccel attempt {} skipped: {}",
-                            order[i] == HwAccel::Vulkan ? "vulkan" : "vaapi",
+                            hw_accel_name(order[i]),
                             local_err.message.as_str());
             continue;
         }
@@ -678,7 +820,7 @@ auto VideoDecoder::open_with_vk(ref<str> path, u32 target_width, u32 target_heig
                                        &err);
         if (decoder.is_some()) return Ok(rstd::move(decoder).unwrap());
         rstd::log::info("VideoDecoder: hwaccel {} build_internal failed: {} — trying next",
-                        order[i] == HwAccel::Vulkan ? "vulkan" : "vaapi",
+                        hw_accel_name(order[i]),
                         err.message.as_str());
         /* build_internal already unref'd `hwd` on failure via state. */
     }
@@ -703,6 +845,32 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
         return make_stream.as_mut_ptr()->operator()();
     };
 
+    /* VideoToolbox does not need a shared Vulkan producer: FFmpeg owns the
+     * decoder device and the frame is bridged to Metal later by the caller. */
+#if defined(__APPLE__)
+    if (! producer &&
+        (opts.hwaccel == HwAccel::Auto || opts.hwaccel == HwAccel::VideoToolbox)) {
+        Error        local_err;
+        AVBufferRef* hwd = make_videotoolbox_hwdevice(&local_err);
+        if (hwd != nullptr) {
+            Error err;
+            auto decoder = build_internal(InputSpec { {}, Some(fresh_stream()) },
+                                          target_width,
+                                          target_height,
+                                          loop,
+                                          hwd,
+                                          FrameKind::VideoToolbox,
+                                          &err);
+            if (decoder.is_some()) return Ok(rstd::move(decoder).unwrap());
+            rstd::log::info("VideoDecoder: VideoToolbox build_internal failed: {} — falling back",
+                            err.message.as_str());
+        } else {
+            rstd::log::info("VideoDecoder: VideoToolbox unavailable: {}",
+                            local_err.message.as_str());
+        }
+    }
+#endif
+
     /* Sw / vaapi-only fast path (no shared Vulkan hwdev). */
     if (! producer) {
         Error err;
@@ -721,13 +889,18 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
      * gets a fresh IInputStream from the factory — build_internal
      * consumes it, and on failure State's destructor cleans up. */
     auto    render_node = resolve_render_node(*producer, opts);
-    HwAccel order[2]    = { HwAccel::None, HwAccel::None };
+    HwAccel order[3]    = { HwAccel::None, HwAccel::None, HwAccel::None };
     int     n_order     = 0;
     switch (opts.hwaccel) {
     case HwAccel::Auto:
+#if defined(__APPLE__)
+        order[0] = HwAccel::VideoToolbox;
+        n_order  = 1;
+#else
         order[0] = HwAccel::Vulkan;
         order[1] = HwAccel::Vaapi;
         n_order  = 2;
+#endif
         break;
     case HwAccel::Vulkan:
         order[0] = HwAccel::Vulkan;
@@ -735,6 +908,10 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
         break;
     case HwAccel::Vaapi:
         order[0] = HwAccel::Vaapi;
+        n_order  = 1;
+        break;
+    case HwAccel::VideoToolbox:
+        order[0] = HwAccel::VideoToolbox;
         n_order  = 1;
         break;
     case HwAccel::None: n_order = 0; break;
@@ -754,10 +931,17 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
 #else
             local_err.message = String::make("wavsen built without VAAPI support"_str);
 #endif
+        } else if (order[i] == HwAccel::VideoToolbox) {
+#if defined(__APPLE__)
+            hwd  = make_videotoolbox_hwdevice(&local_err);
+            kind = FrameKind::VideoToolbox;
+#else
+            local_err.message = String::make("VideoToolbox is only available on Apple platforms"_str);
+#endif
         }
         if (! hwd) {
             rstd::log::info("VideoDecoder: hwaccel attempt {} skipped: {}",
-                            order[i] == HwAccel::Vulkan ? "vulkan" : "vaapi",
+                            hw_accel_name(order[i]),
                             local_err.message.as_str());
             continue;
         }
@@ -771,7 +955,7 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
                                        &err);
         if (decoder.is_some()) return Ok(rstd::move(decoder).unwrap());
         rstd::log::info("VideoDecoder: hwaccel {} build_internal failed: {} — trying next",
-                        order[i] == HwAccel::Vulkan ? "vulkan" : "vaapi",
+                        hw_accel_name(order[i]),
                         err.message.as_str());
         /* build_internal already unref'd `hwd` via State on failure. */
     }
@@ -930,6 +1114,13 @@ auto VideoDecoder::build_internal(InputSpec input, u32 target_width, u32 target_
                             avcodec_get_name(par->codec_id));
         }
 #endif
+#if defined(__APPLE__)
+        else if (requested_kind == FrameKind::VideoToolbox) {
+            self->state_->cctx->get_format = get_format_prefer_videotoolbox;
+            rstd::log::info("VideoDecoder: AV_HWDEVICE_TYPE_VIDEOTOOLBOX attached for codec {}.",
+                            avcodec_get_name(par->codec_id));
+        }
+#endif
     } else {
         rstd::log::info("VideoDecoder: sw decode for codec {}.", avcodec_get_name(par->codec_id));
     }
@@ -969,6 +1160,11 @@ auto VideoDecoder::build_internal(InputSpec input, u32 target_width, u32 target_
     } else if (requested_kind == FrameKind::VaapiDrm) {
         want_pix_fmt = AV_PIX_FMT_VAAPI;
         hw_label     = "vaapi";
+#if defined(__APPLE__)
+    } else if (requested_kind == FrameKind::VideoToolbox) {
+        want_pix_fmt = AV_PIX_FMT_VIDEOTOOLBOX;
+        hw_label     = "videotoolbox";
+#endif
     }
     if (want_pix_fmt != AV_PIX_FMT_NONE) {
         AVPacket* probe = av_packet_alloc();
@@ -1007,6 +1203,9 @@ auto VideoDecoder::build_internal(InputSpec input, u32 target_width, u32 target_
         }
     }
 
+#if defined(__APPLE__)
+    if (self->kind_ == FrameKind::VideoToolbox) self->start_apple_prefetch();
+#endif
     return Some(rstd::move(self));
 }
 
@@ -1171,6 +1370,79 @@ int VideoDecoder::next_vaapi_frame_(VaapiFrameView& out, Error* err) {
             return -1;
         }
     }
+}
+
+int VideoDecoder::next_apple_frame_(AppleVideoFrameView& out, Error* err) {
+#if ! defined(__APPLE__)
+    fail(err, "next_apple_frame called on a non-Apple build"_str);
+    return -1;
+#else
+    if (kind_ != FrameKind::VideoToolbox) {
+        fail(err, "next_apple_frame called on a non-VideoToolbox decoder"_str);
+        return -1;
+    }
+    State& st     = *state_;
+    bool   looped = false;
+
+    av_frame_unref(st.src_frame.get());
+    while (true) {
+        int rc = avcodec_receive_frame(st.cctx.get(), st.src_frame.get());
+        if (rc == 0) {
+            if (st.src_frame->format != AV_PIX_FMT_VIDEOTOOLBOX) {
+                fail(err, "next_apple_frame: decoder produced a non-VideoToolbox frame"_str);
+                return -1;
+            }
+            out.width       = u32(static_cast<rstd::uint32_t>(st.src_frame->width));
+            out.height      = u32(static_cast<rstd::uint32_t>(st.src_frame->height));
+            out.colorspace  = map_colorspace(st.src_frame->colorspace);
+            out.color_range = map_range(st.src_frame->color_range);
+            const rstd::int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                                          ? st.src_frame->best_effort_timestamp
+                                          : st.src_frame->pts;
+            out.pts_seconds = pts == AV_NOPTS_VALUE
+                                  ? f64(-1.0)
+                                  : f64(static_cast<double>(pts) * ffi::av_q2d(st.stream_tb));
+            return looped ? 2 : 0;
+        }
+        if (rc == AVERROR_EOF) {
+            if (loop_) {
+                if (! seek_to_start(st)) {
+                    fail(err, "loop seek-to-zero failed"_str);
+                    return -1;
+                }
+                looped = true;
+                continue;
+            }
+            return 1;
+        }
+        if (rc != AVERROR(EAGAIN)) {
+            fail(err, rstd::format("avcodec_receive_frame: {}", av_err_str(rc).as_str()));
+            return -1;
+        }
+        if (st.flushing) continue;
+
+        rc = av_read_frame(st.fmt.get(), st.pkt.get());
+        if (rc == AVERROR_EOF) {
+            avcodec_send_packet(st.cctx.get(), nullptr);
+            st.flushing = true;
+            continue;
+        }
+        if (rc < 0) {
+            fail(err, rstd::format("av_read_frame: {}", av_err_str(rc).as_str()));
+            return -1;
+        }
+        if (st.pkt->stream_index != st.video_idx) {
+            av_packet_unref(st.pkt.get());
+            continue;
+        }
+        rc = avcodec_send_packet(st.cctx.get(), st.pkt.get());
+        av_packet_unref(st.pkt.get());
+        if (rc < 0 && rc != AVERROR(EAGAIN)) {
+            fail(err, rstd::format("avcodec_send_packet: {}", av_err_str(rc).as_str()));
+            return -1;
+        }
+    }
+#endif
 }
 
 int VideoDecoder::next_frame_(Nv12Frame& out, Error* err) {
@@ -1357,6 +1629,133 @@ auto VideoDecoder::next_vaapi_frame() -> Result<VaapiFramePull, Error> {
     });
 }
 
+auto VideoDecoder::next_apple_frame_sync() -> Result<AppleFramePull, Error> {
+#if ! defined(__APPLE__)
+    return Err(Error("VideoToolbox is only available on Apple platforms"_str));
+#else
+    AppleVideoFrameView out;
+    Error               err;
+    int                 rc = next_apple_frame_(out, &err);
+    if (rc < 0) return Err(rstd::move(err));
+    if (rc == 1) return Ok(AppleFramePull { .status = NextFrame::Eof, .frame = None() });
+
+    WavsenAppleVideoFrame raw {};
+    char                  error[512] = {};
+    if (! wavsen_apple_retain_videotoolbox_frame(
+            state_->src_frame.get(), &raw, error, sizeof(error))) {
+        return Err(Error(rstd::cppstd::as_str(error).unwrap()));
+    }
+    auto lease_state = Box<AppleFrameLease::State>::make();
+    lease_state->frame = raw;
+    auto state_ptr = rstd::move(lease_state).into_raw().as_raw_ptr();
+    AppleVideoFrameView view {
+        .pixel_buffer = raw.pixel_buffer,
+        .io_surface   = raw.io_surface,
+        .width        = u32(raw.width),
+        .height       = u32(raw.height),
+        .pixel_format = u32(raw.pixel_format),
+        .plane_count  = u32(raw.plane_count),
+        .pts_seconds  = out.pts_seconds,
+        .colorspace   = out.colorspace,
+        .color_range  = out.color_range,
+    };
+    return Ok(AppleFramePull {
+        .status = rc == 2 ? NextFrame::Looped : NextFrame::Ok,
+        .frame  = Some(AppleFrameLease(state_ptr, rstd::move(view))),
+    });
+#endif
+}
+
+void VideoDecoder::start_apple_prefetch() {
+#if defined(__APPLE__)
+    State& state = *state_;
+    std::lock_guard lock(state.apple_prefetch_mutex);
+    if (state.apple_prefetch_thread.joinable()) return;
+
+    state.apple_prefetch_stop          = false;
+    state.apple_prefetch_error         = false;
+    state.apple_prefetch_error_message = {};
+    state.apple_prefetch_thread        = std::thread([this] {
+        constexpr std::size_t kQueueCapacity = 8;
+        State&                 state         = *state_;
+
+        for (;;) {
+            {
+                std::unique_lock lock(state.apple_prefetch_mutex);
+                state.apple_prefetch_condition.wait(lock, [&] {
+                    return state.apple_prefetch_stop ||
+                           state.apple_prefetch_frames.size() < kQueueCapacity;
+                });
+                if (state.apple_prefetch_stop) return;
+            }
+
+            auto pulled = next_apple_frame_sync();
+            if (pulled.is_err()) {
+                auto error = rstd::move(pulled).unwrap_err();
+                std::lock_guard lock(state.apple_prefetch_mutex);
+                if (state.apple_prefetch_stop) return;
+                state.apple_prefetch_error         = true;
+                state.apple_prefetch_error_message = rstd::move(error.message);
+                state.apple_prefetch_condition.notify_all();
+                return;
+            }
+
+            auto frame = rstd::move(pulled).unwrap();
+            std::lock_guard lock(state.apple_prefetch_mutex);
+            if (state.apple_prefetch_stop) return;
+            state.apple_prefetch_frames.push_back(rstd::move(frame));
+            state.apple_prefetch_condition.notify_all();
+        }
+    });
+#else
+    (void)this;
+#endif
+}
+
+void VideoDecoder::stop_apple_prefetch() {
+#if defined(__APPLE__)
+    State& state = *state_;
+    {
+        std::lock_guard lock(state.apple_prefetch_mutex);
+        state.apple_prefetch_stop = true;
+    }
+    state.apple_prefetch_condition.notify_all();
+    if (state.apple_prefetch_thread.joinable()) state.apple_prefetch_thread.join();
+
+    std::lock_guard lock(state.apple_prefetch_mutex);
+    state.apple_prefetch_frames.clear();
+    state.apple_prefetch_error         = false;
+    state.apple_prefetch_error_message = {};
+#else
+    (void)this;
+#endif
+}
+
+auto VideoDecoder::next_apple_frame() -> Result<AppleFramePull, Error> {
+#if ! defined(__APPLE__)
+    return Err(Error("VideoToolbox is only available on Apple platforms"_str));
+#else
+    start_apple_prefetch();
+    State& state = *state_;
+    std::unique_lock lock(state.apple_prefetch_mutex);
+    state.apple_prefetch_condition.wait(lock, [&] {
+        return state.apple_prefetch_stop || ! state.apple_prefetch_frames.empty() ||
+               state.apple_prefetch_error;
+    });
+
+    if (! state.apple_prefetch_frames.empty()) {
+        auto frame = rstd::move(state.apple_prefetch_frames.front());
+        state.apple_prefetch_frames.pop_front();
+        state.apple_prefetch_condition.notify_all();
+        return Ok(rstd::move(frame));
+    }
+    if (state.apple_prefetch_error) {
+        return Err(Error(state.apple_prefetch_error_message.clone()));
+    }
+    return Err(Error("VideoToolbox prefetch stopped"_str));
+#endif
+}
+
 auto VideoDecoder::next_drm_frame() -> Result<DrmFramePull, Error> {
     auto pulled = next_vaapi_frame();
     if (pulled.is_err()) return Err(rstd::move(pulled).unwrap_err());
@@ -1378,6 +1777,10 @@ auto VideoDecoder::seek(f64 seconds) -> Result<empty, Error> {
         return Err(Error("seek time must be finite and non-negative"_str));
     }
 
+#if defined(__APPLE__)
+    if (kind_ == FrameKind::VideoToolbox) stop_apple_prefetch();
+#endif
+
     State& st    = *state_;
     auto   limit = duration();
     if (limit.is_some()) seconds = seconds.min(*limit);
@@ -1388,10 +1791,16 @@ auto VideoDecoder::seek(f64 seconds) -> Result<empty, Error> {
     const auto timestamp = static_cast<rstd::int64_t>(seconds.to_primitive() / time_base);
     const int  rc = av_seek_frame(st.fmt.get(), st.video_idx, timestamp, AVSEEK_FLAG_BACKWARD);
     if (rc < 0) {
+#if defined(__APPLE__)
+        if (kind_ == FrameKind::VideoToolbox) start_apple_prefetch();
+#endif
         return Err(Error(rstd::format("av_seek_frame: {}", av_err_str(rc).as_str())));
     }
 
     reset_after_seek(st);
+#if defined(__APPLE__)
+    if (kind_ == FrameKind::VideoToolbox) start_apple_prefetch();
+#endif
     return Ok(empty {});
 }
 
@@ -1403,6 +1812,56 @@ auto VideoDecoder::duration() const -> Option<f64> {
     const auto* stream = st.fmt->streams[st.video_idx];
     if (stream->duration <= 0) return None();
     return Some(f64(static_cast<double>(stream->duration) * ffi::av_q2d(stream->time_base)));
+}
+
+auto create_apple_video_metal_texture(const AppleFrameLease& lease, void* metal_device)
+    -> Result<void*, Error> {
+#if defined(__APPLE__)
+    return create_apple_video_metal_texture(lease, metal_device, nullptr);
+#else
+    (void)lease;
+    (void)metal_device;
+    return Err(Error("Metal video textures are only available on Apple platforms"_str));
+#endif
+}
+
+auto create_apple_video_metal_texture(const AppleFrameLease& lease,
+                                      void* metal_device,
+                                      void* reusable_metal_texture)
+    -> Result<void*, Error> {
+#if ! defined(__APPLE__)
+    (void)lease;
+    (void)metal_device;
+    (void)reusable_metal_texture;
+    return Err(Error("Metal video textures are only available on Apple platforms"_str));
+#else
+    if (! lease.valid()) return Err(Error("cannot create a Metal texture from an empty frame lease"_str));
+    const auto& view = lease.view();
+    WavsenAppleVideoFrame raw {
+        .pixel_buffer = view.pixel_buffer,
+        .io_surface   = view.io_surface,
+        .width        = view.width.to_primitive(),
+        .height       = view.height.to_primitive(),
+        .pixel_format = view.pixel_format.to_primitive(),
+        .plane_count  = view.plane_count.to_primitive(),
+        .pts_seconds  = view.pts_seconds.to_primitive(),
+        .colorspace   = view.colorspace.to_primitive(),
+        .color_range  = view.color_range.to_primitive(),
+    };
+    char error[512] = {};
+    void* texture = wavsen_apple_create_metal_texture(
+        &raw, metal_device, reusable_metal_texture, error, sizeof(error));
+    if (texture == nullptr) return Err(Error(rstd::cppstd::as_str(error).unwrap()));
+    return Ok(texture);
+#endif
+}
+
+void release_apple_video_metal_texture(void* metal_texture) {
+#if defined(__APPLE__)
+    wavsen_apple_release_metal_texture(metal_texture);
+#else
+    (void)metal_texture;
+#endif
 }
 
 } // namespace wavsen::video
