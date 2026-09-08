@@ -3,8 +3,8 @@ export module wavsen.audio:file;
 import rstd.cppstd;
 import rstd;
 import :byte_stream;
-import :core;  // DeviceDesc
-import :mixer; // SoundStream (for make_stream factory)
+import wavsen.audio.core; // DeviceDesc
+import :mixer;            // SoundStream (for make_stream factory)
 
 using namespace rstd::prelude;
 

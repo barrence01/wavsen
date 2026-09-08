@@ -67,5 +67,26 @@ int main() {
     for (rstd::size_t index = 0; index < wavsen::audio::kAudioSampleCount; ++index) {
         if (whole_window.samples[usize(index)] != chunked_window.samples[usize(index)]) return 9;
     }
+    wavsen::audio::capture::PcmWindowPublisher concurrent;
+    concurrent.restart();
+    rstd::sync::atomic::Atomic<bool> done { false };
+    auto                             writer = rstd::thread::spawn([&] {
+        rstd::array<float, wavsen::audio::kAudioSampleCount> values {};
+        for (unsigned sequence = 1; sequence <= 256; ++sequence) {
+            for (auto& value : values) value = static_cast<float>(sequence);
+            concurrent.ingest(values.data(), wavsen::audio::kAudioWindowFrames, 2);
+        }
+        done.store(true, rstd::sync::atomic::Ordering::Release);
+    });
+    if (writer.is_err()) return 10;
+    while (! done.load(rstd::sync::atomic::Ordering::Acquire)) {
+        wavsen::audio::AudioPcmWindow current {};
+        if (! concurrent.snapshot(current)) continue;
+        for (auto sample : current.samples)
+            if (sample.to_primitive() != static_cast<float>(current.sequence)) return 11;
+    }
+    (void)rstd::move(writer).unwrap().join();
+    wavsen::audio::AudioPcmWindow final {};
+    if (! concurrent.snapshot(final) || final.sequence != 256) return 12;
     return 0;
 }

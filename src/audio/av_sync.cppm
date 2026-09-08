@@ -2,7 +2,7 @@ export module wavsen.audio:av_sync;
 
 import rstd;
 import :byte_stream;
-import :core;
+import wavsen.audio.core;
 
 using namespace rstd::prelude;
 

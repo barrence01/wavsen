@@ -2,7 +2,7 @@ module wavsen.audio;
 
 import rstd.cppstd;
 import rstd;
-import :core;
+import wavsen.audio.core;
 import :mixer;
 
 using namespace rstd::prelude;

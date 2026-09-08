@@ -1,4 +1,4 @@
-export module wavsen.audio:core;
+export module wavsen.audio.core;
 
 import rstd.cppstd;
 import rstd;

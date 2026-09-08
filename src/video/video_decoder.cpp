@@ -296,8 +296,8 @@ AVPixelFormat get_format_prefer_videotoolbox(AVCodecContext* cctx, const AVPixel
             return AV_PIX_FMT_VIDEOTOOLBOX;
         }
 
-        auto* fc       = reinterpret_cast<AVHWFramesContext*>(hw_frames->data);
-        fc->sw_format = AV_PIX_FMT_BGRA;
+        auto* fc          = reinterpret_cast<AVHWFramesContext*>(hw_frames->data);
+        fc->sw_format     = AV_PIX_FMT_BGRA;
         const int init_rc = av_hwframe_ctx_init(hw_frames);
         if (init_rc < 0) {
             rstd::log::warn("get_format_prefer_videotoolbox: BGRA frame-pool initialization "
@@ -317,7 +317,7 @@ AVPixelFormat get_format_prefer_videotoolbox(AVCodecContext* cctx, const AVPixel
 }
 
 AVBufferRef* make_videotoolbox_hwdevice(Error* err) {
-    AVBufferRef* hwd = nullptr;
+    AVBufferRef* hwd        = nullptr;
     char         error[512] = {};
     if (! wavsen_apple_create_videotoolbox_device(&hwd, error, sizeof(error))) {
         fail(err, rstd::cppstd::as_str(error).unwrap());
@@ -801,7 +801,8 @@ auto VideoDecoder::open_with_vk(ref<str> path, u32 target_width, u32 target_heig
             hwd  = make_videotoolbox_hwdevice(&local_err);
             kind = FrameKind::VideoToolbox;
 #else
-            local_err.message = String::make("VideoToolbox is only available on Apple platforms"_str);
+            local_err.message =
+                String::make("VideoToolbox is only available on Apple platforms"_str);
 #endif
         }
         if (! hwd) {
@@ -848,19 +849,18 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
     /* VideoToolbox does not need a shared Vulkan producer: FFmpeg owns the
      * decoder device and the frame is bridged to Metal later by the caller. */
 #if defined(__APPLE__)
-    if (! producer &&
-        (opts.hwaccel == HwAccel::Auto || opts.hwaccel == HwAccel::VideoToolbox)) {
+    if (! producer && (opts.hwaccel == HwAccel::Auto || opts.hwaccel == HwAccel::VideoToolbox)) {
         Error        local_err;
         AVBufferRef* hwd = make_videotoolbox_hwdevice(&local_err);
         if (hwd != nullptr) {
             Error err;
-            auto decoder = build_internal(InputSpec { {}, Some(fresh_stream()) },
-                                          target_width,
-                                          target_height,
-                                          loop,
-                                          hwd,
-                                          FrameKind::VideoToolbox,
-                                          &err);
+            auto  decoder = build_internal(InputSpec { {}, Some(fresh_stream()) },
+                                           target_width,
+                                           target_height,
+                                           loop,
+                                           hwd,
+                                           FrameKind::VideoToolbox,
+                                           &err);
             if (decoder.is_some()) return Ok(rstd::move(decoder).unwrap());
             rstd::log::info("VideoDecoder: VideoToolbox build_internal failed: {} — falling back",
                             err.message.as_str());
@@ -936,7 +936,8 @@ auto VideoDecoder::open_from_stream(InputStreamFactory make_stream, u32 target_w
             hwd  = make_videotoolbox_hwdevice(&local_err);
             kind = FrameKind::VideoToolbox;
 #else
-            local_err.message = String::make("VideoToolbox is only available on Apple platforms"_str);
+            local_err.message =
+                String::make("VideoToolbox is only available on Apple platforms"_str);
 #endif
         }
         if (! hwd) {
@@ -1392,10 +1393,10 @@ int VideoDecoder::next_apple_frame_(AppleVideoFrameView& out, Error* err) {
                 fail(err, "next_apple_frame: decoder produced a non-VideoToolbox frame"_str);
                 return -1;
             }
-            out.width       = u32(static_cast<rstd::uint32_t>(st.src_frame->width));
-            out.height      = u32(static_cast<rstd::uint32_t>(st.src_frame->height));
-            out.colorspace  = map_colorspace(st.src_frame->colorspace);
-            out.color_range = map_range(st.src_frame->color_range);
+            out.width               = u32(static_cast<rstd::uint32_t>(st.src_frame->width));
+            out.height              = u32(static_cast<rstd::uint32_t>(st.src_frame->height));
+            out.colorspace          = map_colorspace(st.src_frame->colorspace);
+            out.color_range         = map_range(st.src_frame->color_range);
             const rstd::int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                           ? st.src_frame->best_effort_timestamp
                                           : st.src_frame->pts;
@@ -1629,10 +1630,8 @@ auto VideoDecoder::next_vaapi_frame() -> Result<VaapiFramePull, Error> {
     });
 }
 
+#if defined(__APPLE__)
 auto VideoDecoder::next_apple_frame_sync() -> Result<AppleFramePull, Error> {
-#if ! defined(__APPLE__)
-    return Err(Error("VideoToolbox is only available on Apple platforms"_str));
-#else
     AppleVideoFrameView out;
     Error               err;
     int                 rc = next_apple_frame_(out, &err);
@@ -1645,9 +1644,9 @@ auto VideoDecoder::next_apple_frame_sync() -> Result<AppleFramePull, Error> {
             state_->src_frame.get(), &raw, error, sizeof(error))) {
         return Err(Error(rstd::cppstd::as_str(error).unwrap()));
     }
-    auto lease_state = Box<AppleFrameLease::State>::make();
-    lease_state->frame = raw;
-    auto state_ptr = rstd::move(lease_state).into_raw().as_raw_ptr();
+    auto lease_state              = Box<AppleFrameLease::State>::make();
+    lease_state->frame            = raw;
+    auto                state_ptr = rstd::move(lease_state).into_raw().as_raw_ptr();
     AppleVideoFrameView view {
         .pixel_buffer = raw.pixel_buffer,
         .io_surface   = raw.io_surface,
@@ -1663,12 +1662,10 @@ auto VideoDecoder::next_apple_frame_sync() -> Result<AppleFramePull, Error> {
         .status = rc == 2 ? NextFrame::Looped : NextFrame::Ok,
         .frame  = Some(AppleFrameLease(state_ptr, rstd::move(view))),
     });
-#endif
 }
 
 void VideoDecoder::start_apple_prefetch() {
-#if defined(__APPLE__)
-    State& state = *state_;
+    State&          state = *state_;
     std::lock_guard lock(state.apple_prefetch_mutex);
     if (state.apple_prefetch_thread.joinable()) return;
 
@@ -1677,7 +1674,7 @@ void VideoDecoder::start_apple_prefetch() {
     state.apple_prefetch_error_message = {};
     state.apple_prefetch_thread        = std::thread([this] {
         constexpr std::size_t kQueueCapacity = 8;
-        State&                 state         = *state_;
+        State&                state          = *state_;
 
         for (;;) {
             {
@@ -1691,7 +1688,7 @@ void VideoDecoder::start_apple_prefetch() {
 
             auto pulled = next_apple_frame_sync();
             if (pulled.is_err()) {
-                auto error = rstd::move(pulled).unwrap_err();
+                auto            error = rstd::move(pulled).unwrap_err();
                 std::lock_guard lock(state.apple_prefetch_mutex);
                 if (state.apple_prefetch_stop) return;
                 state.apple_prefetch_error         = true;
@@ -1700,20 +1697,16 @@ void VideoDecoder::start_apple_prefetch() {
                 return;
             }
 
-            auto frame = rstd::move(pulled).unwrap();
+            auto            frame = rstd::move(pulled).unwrap();
             std::lock_guard lock(state.apple_prefetch_mutex);
             if (state.apple_prefetch_stop) return;
             state.apple_prefetch_frames.push_back(rstd::move(frame));
             state.apple_prefetch_condition.notify_all();
         }
     });
-#else
-    (void)this;
-#endif
 }
 
 void VideoDecoder::stop_apple_prefetch() {
-#if defined(__APPLE__)
     State& state = *state_;
     {
         std::lock_guard lock(state.apple_prefetch_mutex);
@@ -1726,17 +1719,15 @@ void VideoDecoder::stop_apple_prefetch() {
     state.apple_prefetch_frames.clear();
     state.apple_prefetch_error         = false;
     state.apple_prefetch_error_message = {};
-#else
-    (void)this;
-#endif
 }
+#endif
 
 auto VideoDecoder::next_apple_frame() -> Result<AppleFramePull, Error> {
 #if ! defined(__APPLE__)
     return Err(Error("VideoToolbox is only available on Apple platforms"_str));
 #else
     start_apple_prefetch();
-    State& state = *state_;
+    State&           state = *state_;
     std::unique_lock lock(state.apple_prefetch_mutex);
     state.apple_prefetch_condition.wait(lock, [&] {
         return state.apple_prefetch_stop || ! state.apple_prefetch_frames.empty() ||
@@ -1825,18 +1816,17 @@ auto create_apple_video_metal_texture(const AppleFrameLease& lease, void* metal_
 #endif
 }
 
-auto create_apple_video_metal_texture(const AppleFrameLease& lease,
-                                      void* metal_device,
-                                      void* reusable_metal_texture)
-    -> Result<void*, Error> {
+auto create_apple_video_metal_texture(const AppleFrameLease& lease, void* metal_device,
+                                      void* reusable_metal_texture) -> Result<void*, Error> {
 #if ! defined(__APPLE__)
     (void)lease;
     (void)metal_device;
     (void)reusable_metal_texture;
     return Err(Error("Metal video textures are only available on Apple platforms"_str));
 #else
-    if (! lease.valid()) return Err(Error("cannot create a Metal texture from an empty frame lease"_str));
-    const auto& view = lease.view();
+    if (! lease.valid())
+        return Err(Error("cannot create a Metal texture from an empty frame lease"_str));
+    const auto&           view = lease.view();
     WavsenAppleVideoFrame raw {
         .pixel_buffer = view.pixel_buffer,
         .io_surface   = view.io_surface,
@@ -1848,8 +1838,8 @@ auto create_apple_video_metal_texture(const AppleFrameLease& lease,
         .colorspace   = view.colorspace.to_primitive(),
         .color_range  = view.color_range.to_primitive(),
     };
-    char error[512] = {};
-    void* texture = wavsen_apple_create_metal_texture(
+    char  error[512] = {};
+    void* texture    = wavsen_apple_create_metal_texture(
         &raw, metal_device, reusable_metal_texture, error, sizeof(error));
     if (texture == nullptr) return Err(Error(rstd::cppstd::as_str(error).unwrap()));
     return Ok(texture);

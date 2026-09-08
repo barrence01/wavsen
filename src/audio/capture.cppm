@@ -46,7 +46,7 @@ public:
     void uninit();
     auto is_inited() const -> bool;
 
-    // Returns each complete window at most once to this reader.
+    // Call from one reader; returns each complete window at most once.
     bool snapshot(AudioPcmWindow& out);
 
 private:

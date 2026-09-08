@@ -4,8 +4,8 @@ import rstd;
 import rstd.cppstd;
 import rstd.log;
 import :byte_stream;
-import :core;  // DeviceDesc
-import :mixer; // SoundStream
+import wavsen.audio.core; // DeviceDesc
+import :mixer;            // SoundStream
 import :file;
 import wavsen.ffi.ffmpeg;
 

@@ -2,6 +2,18 @@
 name = "wavsen"
 version = "0.1.0"
 
+[[test]]
+name = "audio-capture-window"
+sources = ["tests/audio_capture_window_tests.cpp"]
+
+[[test]]
+name = "audio-gain"
+sources = ["tests/audio_gain_tests.cpp"]
+
+[[test]]
+name = "audio-backend"
+sources = ["tests/audio_backend_tests.cpp"]
+
 [lib]
 name = "wavsen"
 module = "wavsen"
@@ -22,6 +34,8 @@ sources = [
   "src/audio/av_sync.cpp",
   "src/audio/byte_stream.cppm",
   "src/audio/capture.cppm",
+  "src/audio/capture.cpp",
+  "src/audio/backend/contract.cppm",
   "src/audio/capture_window.cppm",
   "src/audio/core.cppm",
   "src/audio/file.cppm",
@@ -39,8 +53,8 @@ sources = [
   "src/ffi/ffmpeg/swscale.cppm",
 ]
 when = [
-  { condition = 'target.os == "macos"', source-groups = ["macos-audio-capture"] },
-  { condition = 'target.os != "macos"', source-groups = ["portable-audio-capture"] },
+  { condition = 'target.os == "macos"', source-groups = ["coreaudio"] },
+  { condition = 'target.os != "macos"', source-groups = ["pulse"] },
 ]
 
 [[when]]
@@ -120,20 +134,31 @@ package = "WavsenShader"
 source = "wavsen-shader"
 targets = [{ name = "WavsenShader::nv12_to_rgba" }]
 
-[source-groups.portable-audio-capture]
-sources = ["src/audio/capture.cpp"]
+[source-groups.pulse]
+sources = [
+  "src/ffi/pulse/mod.cppm",
+  "src/ffi/pulse/mod.cpp",
+  "src/audio/backend/pulse/capture.cppm",
+  "src/audio/backend/pulse/capture.cpp",
+  "src/audio/backend/pulse/output.cppm",
+  "src/audio/backend/pulse/output.cpp",
+]
 
-[source-groups.macos-audio-capture]
-sources = ["src/audio/audio_capture_coreaudio.cpp"]
+[source-groups.coreaudio]
+sources = [
+  "src/ffi/coreaudio/mod.cppm",
+  "src/audio/backend/coreaudio/capture.cppm",
+  "src/audio/backend/coreaudio/capture.cpp",
+  "src/audio/backend/coreaudio/process_tap.mm",
+  "src/audio/backend/coreaudio/output.cppm",
+  "src/audio/backend/coreaudio/output.cpp",
+]
 
-[external-sources.wavsen-apple-audio]
-path = "src/audio"
-
-[external-dependencies.cmake.wavsen-apple-audio]
-package = "WavsenAppleAudio"
-source = "wavsen-apple-audio"
+[[when]]
 condition = 'target.os == "macos"'
-targets = [{ name = "WavsenAppleAudio::capture" }]
+
+[when.usage]
+frameworks = ["CoreAudio", "AudioToolbox", "CoreFoundation", "Foundation"]
 
 [external-sources.wavsen-apple-bridge]
 path = "src/video"

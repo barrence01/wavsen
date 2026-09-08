@@ -22,9 +22,8 @@ public:
         head_             = 0;
         filled_           = 0;
         for (auto& sample : ring_) sample = f32();
-        publication_.fetch_add(1, rstd::sync::atomic::Ordering::Release);
-        published_.clear();
-        publication_.fetch_add(1, rstd::sync::atomic::Ordering::Release);
+        windows_[write_slot_].clear();
+        publish_slot();
     }
 
     void ingest(const float* source, rstd::uint32_t frame_count, rstd::uint32_t channels) {
@@ -44,19 +43,12 @@ public:
     }
 
     bool snapshot(AudioPcmWindow& out) const {
-        for (int attempt = 0; attempt < 16; ++attempt) {
-            const auto before = publication_.load(rstd::sync::atomic::Ordering::Acquire);
-            if (before == 0 || (before & 1u) != 0) continue;
-            AudioPcmWindow candidate;
-            rstd::mem::memcpy(&candidate, &published_, usize(sizeof(AudioPcmWindow)));
-            const auto after = publication_.load(rstd::sync::atomic::Ordering::Acquire);
-            if (before == after) {
-                out = candidate;
-                return candidate.frames == kAudioWindowFrames;
-            }
+        if (published_slot_.load(rstd::sync::atomic::Ordering::Acquire) & 4u) {
+            read_slot_ =
+                published_slot_.exchange(read_slot_, rstd::sync::atomic::Ordering::AcqRel) & 3u;
         }
-        out.clear();
-        return false;
+        out = windows_[read_slot_];
+        return out.frames == kAudioWindowFrames;
     }
 
 private:
@@ -80,9 +72,15 @@ private:
             window.samples[usize(destination)]     = ring_[usize(source)];
             window.samples[usize(destination + 1)] = ring_[usize(source + 1)];
         }
-        publication_.fetch_add(1, rstd::sync::atomic::Ordering::Release);
-        rstd::mem::memcpy(&published_, &window, usize(sizeof(AudioPcmWindow)));
-        publication_.fetch_add(1, rstd::sync::atomic::Ordering::Release);
+        windows_[write_slot_] = window;
+        publish_slot();
+    }
+
+    void publish_slot() {
+        // One producer and one snapshot reader exchange exclusive slots; a seqlock over
+        // memcpy would still race on non-atomic PCM samples even if the read were retried.
+        write_slot_ =
+            published_slot_.exchange(write_slot_ | 4u, rstd::sync::atomic::Ordering::AcqRel) & 3u;
     }
 
     rstd::array<f32, kAudioSampleCount>                ring_ {};
@@ -91,8 +89,10 @@ private:
     rstd::uint64_t                                     generation_       = 0;
     rstd::uint64_t                                     sequence_         = 0;
     rstd::uint64_t                                     end_sample_frame_ = 0;
-    mutable rstd::sync::atomic::Atomic<rstd::uint32_t> publication_ { 0 };
-    AudioPcmWindow                                     published_ {};
+    mutable rstd::sync::atomic::Atomic<rstd::uint32_t> published_slot_ { 1 };
+    rstd::uint32_t                                     write_slot_ { 0 };
+    mutable rstd::uint32_t                             read_slot_ { 2 };
+    AudioPcmWindow                                     windows_[3] {};
 };
 
 } // namespace wavsen::audio::capture

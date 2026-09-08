@@ -35,7 +35,6 @@ IndentPPDirectives: AfterHash
 IndentWidth: 4
 IndentWrappedFunctionNames: false
 KeepEmptyLinesAtTheStartOfBlocks: false
-Language: Cpp
 PointerAlignment: Left
 SortIncludes: false
 SpaceAfterCStyleCast: false

@@ -4,8 +4,8 @@ import rstd.cppstd;
 import rstd;
 import rstd.log;
 import :byte_stream;
-import :core; // AudioDevice, IPullChannel, DeviceDesc
-import :file; // StreamDecoder
+import wavsen.audio.core; // AudioDevice, IPullChannel, DeviceDesc
+import :file;             // StreamDecoder
 import :av_sync;
 
 using namespace rstd::prelude;
