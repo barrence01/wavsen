@@ -126,13 +126,8 @@ version = ">= 14.0"
 usage = "compile"
 condition = 'target.os != "macos"'
 
-[external-sources.wavsen-shader]
-path = "shaders"
-
-[external-dependencies.cmake.wavsen-shader]
-package = "WavsenShader"
-source = "wavsen-shader"
-targets = [{ name = "WavsenShader::nv12_to_rgba" }]
+[build-tools.glslang]
+path = "glslangValidator"
 
 [source-groups.pulse]
 sources = [
