@@ -10,3 +10,13 @@ lito.run({
 })
 
 lito.target_add_generated_include(target, "include")
+
+lito.write({
+    output = "include/nv12_to_bgra.metal.h",
+    inputs = { "src/video/apple/nv12_to_bgra.metal" },
+    content = [[static constexpr unsigned char wavsen_nv12_metal[] = {
+#embed "@INPUT:1@"
+, 0
+};
+]],
+})

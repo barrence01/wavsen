@@ -117,6 +117,7 @@ export {
     using ::AVCOL_SPC_SMPTE170M;
 
     using ::AV_HWDEVICE_TYPE_DRM;
+    using ::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
     using ::AV_HWDEVICE_TYPE_VULKAN;
 #if defined(WAVSEN_HAS_VAAPI)
     using ::AV_HWDEVICE_TYPE_VAAPI;

@@ -399,19 +399,3 @@ private:
 };
 
 } // namespace wavsen::video
-
-export namespace wavsen::video
-{
-
-// Creates a retained Metal BGRA texture from a VideoToolbox frame. The
-// returned handle is opaque and released with release_apple_video_metal_texture.
-// When reusable_metal_texture is a compatible texture returned by a previous
-// call, the conversion writes into it and returns the same owned handle. The
-// caller must keep that handle alive until the GPU work using it has retired.
-auto create_apple_video_metal_texture(const AppleFrameLease&, void* metal_device)
-    -> Result<void*, Error>;
-auto create_apple_video_metal_texture(const AppleFrameLease&, void* metal_device,
-                                      void* reusable_metal_texture) -> Result<void*, Error>;
-void release_apple_video_metal_texture(void* metal_texture);
-
-} // namespace wavsen::video

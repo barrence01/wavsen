@@ -1,9 +1,5 @@
 module;
 
-#if defined(__APPLE__)
-#    include "apple_video_bridge.hpp"
-#endif
-
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -18,6 +14,10 @@ import vvk;
 import :vk_device;
 import :video_decoder;
 import wavsen.ffi.ffmpeg;
+#if defined(__APPLE__)
+import wavsen.ffi.corefoundation;
+import wavsen.ffi.corevideo;
+#endif
 
 using namespace rstd::prelude;
 using namespace rstd::literals;
@@ -317,10 +317,10 @@ AVPixelFormat get_format_prefer_videotoolbox(AVCodecContext* cctx, const AVPixel
 }
 
 AVBufferRef* make_videotoolbox_hwdevice(Error* err) {
-    AVBufferRef* hwd        = nullptr;
-    char         error[512] = {};
-    if (! wavsen_apple_create_videotoolbox_device(&hwd, error, sizeof(error))) {
-        fail(err, rstd::cppstd::as_str(error).unwrap());
+    AVBufferRef* hwd = nullptr;
+    const int rc = av_hwdevice_ctx_create(&hwd, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nullptr, nullptr, 0);
+    if (rc < 0) {
+        fail(err, rstd::format("create videotoolbox device: {}", av_err_str(rc).as_str()));
         if (hwd) av_buffer_unref(&hwd);
         return nullptr;
     }
@@ -442,9 +442,11 @@ struct VaapiFrameLease::State {
 
 struct AppleFrameLease::State {
 #if defined(__APPLE__)
-    WavsenAppleVideoFrame frame;
+    ffi::corevideo::CVPixelBufferRef pixel_buffer {};
 
-    ~State() { wavsen_apple_release_video_frame(&frame); }
+    ~State() {
+        if (pixel_buffer) ffi::corefoundation::CFRelease(pixel_buffer);
+    }
 #endif
 };
 
@@ -1638,25 +1640,24 @@ auto VideoDecoder::next_apple_frame_sync() -> Result<AppleFramePull, Error> {
     if (rc < 0) return Err(rstd::move(err));
     if (rc == 1) return Ok(AppleFramePull { .status = NextFrame::Eof, .frame = None() });
 
-    WavsenAppleVideoFrame raw {};
-    char                  error[512] = {};
-    if (! wavsen_apple_retain_videotoolbox_frame(
-            state_->src_frame.get(), &raw, error, sizeof(error))) {
-        return Err(Error(rstd::cppstd::as_str(error).unwrap()));
-    }
-    auto lease_state              = Box<AppleFrameLease::State>::make();
-    lease_state->frame            = raw;
+    using namespace ffi::corevideo;
+    auto buffer = reinterpret_cast<CVPixelBufferRef>(state_->src_frame->data[3]);
+    if (! buffer) return Err(Error("videotoolbox frame has no pixel buffer"_str));
+    auto lease_state = Box<AppleFrameLease::State>::make();
+    ffi::corefoundation::CFRetain(buffer);
+    lease_state->pixel_buffer     = buffer;
     auto                state_ptr = rstd::move(lease_state).into_raw().as_raw_ptr();
     AppleVideoFrameView view {
-        .pixel_buffer = raw.pixel_buffer,
-        .io_surface   = raw.io_surface,
-        .width        = u32(raw.width),
-        .height       = u32(raw.height),
-        .pixel_format = u32(raw.pixel_format),
-        .plane_count  = u32(raw.plane_count),
-        .pts_seconds  = out.pts_seconds,
-        .colorspace   = out.colorspace,
-        .color_range  = out.color_range,
+        .pixel_buffer = buffer,
+        .io_surface   = CVPixelBufferGetIOSurface(buffer),
+        .width        = u32(CVPixelBufferGetWidth(buffer)),
+        .height       = u32(CVPixelBufferGetHeight(buffer)),
+        .pixel_format = u32(CVPixelBufferGetPixelFormatType(buffer)),
+        .plane_count =
+            CVPixelBufferIsPlanar(buffer) ? u32(CVPixelBufferGetPlaneCount(buffer)) : u32(1),
+        .pts_seconds = out.pts_seconds,
+        .colorspace  = out.colorspace,
+        .color_range = out.color_range,
     };
     return Ok(AppleFramePull {
         .status = rc == 2 ? NextFrame::Looped : NextFrame::Ok,
@@ -1803,55 +1804,6 @@ auto VideoDecoder::duration() const -> Option<f64> {
     const auto* stream = st.fmt->streams[st.video_idx];
     if (stream->duration <= 0) return None();
     return Some(f64(static_cast<double>(stream->duration) * ffi::av_q2d(stream->time_base)));
-}
-
-auto create_apple_video_metal_texture(const AppleFrameLease& lease, void* metal_device)
-    -> Result<void*, Error> {
-#if defined(__APPLE__)
-    return create_apple_video_metal_texture(lease, metal_device, nullptr);
-#else
-    (void)lease;
-    (void)metal_device;
-    return Err(Error("Metal video textures are only available on Apple platforms"_str));
-#endif
-}
-
-auto create_apple_video_metal_texture(const AppleFrameLease& lease, void* metal_device,
-                                      void* reusable_metal_texture) -> Result<void*, Error> {
-#if ! defined(__APPLE__)
-    (void)lease;
-    (void)metal_device;
-    (void)reusable_metal_texture;
-    return Err(Error("Metal video textures are only available on Apple platforms"_str));
-#else
-    if (! lease.valid())
-        return Err(Error("cannot create a Metal texture from an empty frame lease"_str));
-    const auto&           view = lease.view();
-    WavsenAppleVideoFrame raw {
-        .pixel_buffer = view.pixel_buffer,
-        .io_surface   = view.io_surface,
-        .width        = view.width.to_primitive(),
-        .height       = view.height.to_primitive(),
-        .pixel_format = view.pixel_format.to_primitive(),
-        .plane_count  = view.plane_count.to_primitive(),
-        .pts_seconds  = view.pts_seconds.to_primitive(),
-        .colorspace   = view.colorspace.to_primitive(),
-        .color_range  = view.color_range.to_primitive(),
-    };
-    char  error[512] = {};
-    void* texture    = wavsen_apple_create_metal_texture(
-        &raw, metal_device, reusable_metal_texture, error, sizeof(error));
-    if (texture == nullptr) return Err(Error(rstd::cppstd::as_str(error).unwrap()));
-    return Ok(texture);
-#endif
-}
-
-void release_apple_video_metal_texture(void* metal_texture) {
-#if defined(__APPLE__)
-    wavsen_apple_release_metal_texture(metal_texture);
-#else
-    (void)metal_texture;
-#endif
 }
 
 } // namespace wavsen::video

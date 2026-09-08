@@ -142,6 +142,11 @@ sources = [
 [source-groups.coreaudio]
 sources = [
   "src/ffi/coreaudio/mod.cppm",
+  "src/ffi/corefoundation/mod.cppm",
+  "src/ffi/corevideo/mod.cppm",
+  "src/video/apple/mod.cppm",
+  "src/video/apple/mod.cpp",
+  "src/video/apple/metal.mm",
   "src/audio/backend/coreaudio/capture.cppm",
   "src/audio/backend/coreaudio/capture.cpp",
   "src/audio/backend/coreaudio/process_tap.mm",
@@ -153,13 +158,4 @@ sources = [
 condition = 'target.os == "macos"'
 
 [when.usage]
-frameworks = ["CoreAudio", "AudioToolbox", "CoreFoundation", "Foundation"]
-
-[external-sources.wavsen-apple-bridge]
-path = "src/video"
-
-[external-dependencies.cmake.wavsen-apple-bridge]
-package = "WavsenAppleBridge"
-source = "wavsen-apple-bridge"
-condition = 'target.os == "macos"'
-targets = [{ name = "WavsenAppleBridge::bridge" }]
+frameworks = ["CoreAudio", "AudioToolbox", "CoreFoundation", "Foundation", "CoreVideo", "IOSurface", "Metal"]
