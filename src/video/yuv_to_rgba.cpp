@@ -661,7 +661,9 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
         VkMemoryDedicatedAllocateInfo dedicated_info {};
         dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
         dedicated_info.image = *entry->image;
-        import_info.pNext    = &dedicated_info;
+        // A disjoint image cannot back a dedicated allocation
+        // (VUID-VkMemoryDedicatedAllocateInfo-image-01797).
+        if (! disjoint) import_info.pNext = &dedicated_info;
         VkMemoryAllocateInfo allocate_info {};
         allocate_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocate_info.pNext           = &import_info;
@@ -677,17 +679,20 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
     };
 
     if (disjoint) {
-        auto y_import = import_plane(u32(), planes[0].object_index, VK_IMAGE_ASPECT_PLANE_0_BIT);
+        // DRM-modifier images address memory planes, not format planes.
+        auto y_import =
+            import_plane(u32(), planes[0].object_index, VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT);
         if (y_import.is_err()) return Err(rstd::move(y_import).unwrap_err());
-        auto uv_import = import_plane(u32(1), planes[1].object_index, VK_IMAGE_ASPECT_PLANE_1_BIT);
+        auto uv_import =
+            import_plane(u32(1), planes[1].object_index, VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT);
         if (uv_import.is_err()) return Err(rstd::move(uv_import).unwrap_err());
 
         VkBindImagePlaneMemoryInfo y_plane_info {};
         y_plane_info.sType       = VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
-        y_plane_info.planeAspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+        y_plane_info.planeAspect = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
         VkBindImagePlaneMemoryInfo uv_plane_info {};
         uv_plane_info.sType       = VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
-        uv_plane_info.planeAspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+        uv_plane_info.planeAspect = VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT;
         VkBindImageMemoryInfo bindings[2] {};
         bindings[0].sType        = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
         bindings[0].pNext        = &y_plane_info;
