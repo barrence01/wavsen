@@ -408,11 +408,13 @@ struct DrmImportEntry {
     DrmFrameView           signature;
     Vec<vvk::DeviceMemory> memories;
     vvk::Image             image;
+    vvk::Image             uv_image; // When split_planes, UV is a separate R8G8 image.
     vvk::ImageView         y_view;
     vvk::ImageView         uv_view;
     u32                    in_flight {};
     u64                    last_use_serial {};
     bool                   initialized { false };
+    bool                   split_planes { false }; // Disjoint DMA-BUFs imported as two images.
 };
 
 struct ConversionTargetEntry {
@@ -528,6 +530,115 @@ ConversionReservation::~ConversionReservation() { reset(); }
 namespace
 {
 
+/* Import one DMA-BUF object as a single-plane image.
+ * Used when the Y and UV planes are backed by separate objects. */
+auto import_single_drm_plane(const vvk::Device& device, const vvk::PhysicalDevice& phys,
+                             const DrmObject& object, rstd::uint64_t offset, rstd::uint64_t pitch,
+                             VkFormat format, rstd::uint32_t width, rstd::uint32_t height,
+                             vvk::Image& image, vvk::ImageView& view, vvk::DeviceMemory& memory)
+    -> Result<empty, Error> {
+    if (width == 0 || height == 0) {
+        return Err(Error { "import_single_drm_plane: zero extent"_str });
+    }
+
+    VkSubresourceLayout plane_layout {};
+    plane_layout.offset   = offset;
+    plane_layout.rowPitch = pitch;
+
+    VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info {};
+    modifier_info.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+    modifier_info.drmFormatModifier           = object.format_modifier;
+    modifier_info.drmFormatModifierPlaneCount = 1;
+    modifier_info.pPlaneLayouts               = &plane_layout;
+
+    VkExternalMemoryImageCreateInfo external_info {};
+    external_info.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    external_info.pNext       = &modifier_info;
+
+    VkImageCreateInfo image_info {};
+    image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.pNext         = &external_info;
+    image_info.imageType     = VK_IMAGE_TYPE_2D;
+    image_info.format        = format;
+    image_info.extent        = { width, height, 1 };
+    image_info.mipLevels     = 1;
+    image_info.arrayLayers   = 1;
+    image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+    image_info.tiling        = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    image_info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (const auto result = device.CreateImage(image_info, image); result != VK_SUCCESS) {
+        return Err(Error {
+            rstd::format("vkCreateImage(DRM plane): {}", vk_result_str(result)),
+        });
+    }
+
+    auto duplicate = rstd::os::fd::BorrowedFd::borrow_raw(object.fd).try_clone_to_owned();
+    if (duplicate.is_err()) {
+        return Err(Error {
+            rstd::format("dup(dma_buf): {}", rstd::move(duplicate).unwrap_err_unchecked()) });
+    }
+    auto       duplicate_fd = rstd::move(duplicate).unwrap_unchecked();
+    const auto raw_fd       = duplicate_fd.as_raw_fd();
+
+    VkMemoryFdPropertiesKHR fd_properties {};
+    fd_properties.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+    if (const auto result = device.GetMemoryFdPropertiesKHR(
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, raw_fd, fd_properties);
+        result != VK_SUCCESS) {
+        return Err(Error { vk_error("vkGetMemoryFdPropertiesKHR"_str, result) });
+    }
+
+    const auto requirements = device.GetImageMemoryRequirements(*image);
+    const auto type_bits    = requirements.memoryTypeBits & fd_properties.memoryTypeBits;
+    const auto memory_type  = pick_memory_type(phys, type_bits, 0);
+    if (memory_type == UINT32_MAX) {
+        return Err(Error {
+            "import_single_drm_plane: no compatible memory type"_str,
+        });
+    }
+
+    VkImportMemoryFdInfoKHR import_info {};
+    import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    import_info.fd         = raw_fd;
+    VkMemoryDedicatedAllocateInfo dedicated_info {};
+    dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicated_info.image = *image;
+    import_info.pNext    = &dedicated_info;
+    VkMemoryAllocateInfo allocate_info {};
+    allocate_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate_info.pNext           = &import_info;
+    allocate_info.allocationSize  = object.size.to_primitive();
+    allocate_info.memoryTypeIndex = memory_type;
+    if (const auto result = device.AllocateMemory(allocate_info, memory); result != VK_SUCCESS) {
+        return Err(Error { vk_error("vkAllocateMemory(import DRM plane)"_str, result) });
+    }
+    (void)rstd::move(duplicate_fd).into_raw_fd();
+    if (const auto result = image.BindMemory(*memory, 0); result != VK_SUCCESS) {
+        return Err(Error { vk_error("vkBindImageMemory(DRM plane)"_str, result) });
+    }
+
+    VkImageViewCreateInfo view_info {};
+    view_info.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image      = *image;
+    view_info.viewType   = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format     = format;
+    view_info.components = {
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+        VK_COMPONENT_SWIZZLE_IDENTITY,
+    };
+    view_info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    if (const auto result = device.CreateImageView(view_info, view); result != VK_SUCCESS) {
+        return Err(Error { vk_error("vkCreateImageView(DRM plane)"_str, result) });
+    }
+    return Ok(empty {});
+}
+
 auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phys,
                        const DrmFrameLease& frame) -> Result<Box<DrmImportEntry>, Error> {
     const auto& drm = frame.view();
@@ -565,6 +676,45 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
     entry->key          = frame.resource_key();
     entry->signature    = drm_signature(drm);
     const bool disjoint = planes[0].object_index != planes[1].object_index;
+
+    /* Y and UV backed by separate DMA-BUF objects: import each as a
+     * single-plane image. Shared-object exports keep the path below. */
+    if (disjoint) {
+        entry->split_planes = true;
+        vvk::DeviceMemory y_memory;
+        vvk::DeviceMemory uv_memory;
+        const auto        full_w   = drm.width.to_primitive();
+        const auto        full_h   = drm.height.to_primitive();
+        const auto        chroma_w = (full_w + 1) / 2;
+        const auto        chroma_h = (full_h + 1) / 2;
+        auto              y_import = import_single_drm_plane(device,
+                                                             phys,
+                                                             drm.objects[planes[0].object_index],
+                                                             planes[0].offset,
+                                                             planes[0].pitch,
+                                                             VK_FORMAT_R8_UNORM,
+                                                             full_w,
+                                                             full_h,
+                                                             entry->image,
+                                                             entry->y_view,
+                                                             y_memory);
+        if (y_import.is_err()) return Err(rstd::move(y_import).unwrap_err());
+        auto uv_import = import_single_drm_plane(device,
+                                                 phys,
+                                                 drm.objects[planes[1].object_index],
+                                                 planes[1].offset,
+                                                 planes[1].pitch,
+                                                 VK_FORMAT_R8G8_UNORM,
+                                                 chroma_w,
+                                                 chroma_h,
+                                                 entry->uv_image,
+                                                 entry->uv_view,
+                                                 uv_memory);
+        if (uv_import.is_err()) return Err(rstd::move(uv_import).unwrap_err());
+        entry->memories.push(rstd::move(y_memory));
+        entry->memories.push(rstd::move(uv_memory));
+        return Ok(rstd::move(entry));
+    }
 
     VkSubresourceLayout plane_layouts[2] {};
     plane_layouts[0].offset   = planes[0].offset;
@@ -608,7 +758,6 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
     image_info.usage         = VK_IMAGE_USAGE_SAMPLED_BIT;
     image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (disjoint) image_info.flags |= VK_IMAGE_CREATE_DISJOINT_BIT;
     if (const auto result = device.CreateImage(image_info, entry->image); result != VK_SUCCESS) {
         return Err(Error {
             rstd::format("vkCreateImage(DRM_PRIME): {}", vk_result_str(result)),
@@ -636,13 +785,9 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
             return Err(Error { vk_error("vkGetMemoryFdPropertiesKHR"_str, result) });
         }
 
-        VkImagePlaneMemoryRequirementsInfo plane_requirements {};
-        plane_requirements.sType       = VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO;
-        plane_requirements.planeAspect = aspect;
         VkImageMemoryRequirementsInfo2 requirements_info {};
         requirements_info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
         requirements_info.image = *entry->image;
-        if (disjoint) requirements_info.pNext = &plane_requirements;
         const auto requirements = device.GetImageMemoryRequirements2(requirements_info);
 
         const auto type_bits =
@@ -661,9 +806,7 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
         VkMemoryDedicatedAllocateInfo dedicated_info {};
         dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
         dedicated_info.image = *entry->image;
-        // A disjoint image cannot back a dedicated allocation
-        // (VUID-VkMemoryDedicatedAllocateInfo-image-01797).
-        if (! disjoint) import_info.pNext = &dedicated_info;
+        import_info.pNext    = &dedicated_info;
         VkMemoryAllocateInfo allocate_info {};
         allocate_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocate_info.pNext           = &import_info;
@@ -678,48 +821,13 @@ auto create_drm_import(const vvk::Device& device, const vvk::PhysicalDevice& phy
         return Ok(empty {});
     };
 
-    if (disjoint) {
-        // DRM-modifier images address memory planes, not format planes.
-        auto y_import =
-            import_plane(u32(), planes[0].object_index, VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT);
-        if (y_import.is_err()) return Err(rstd::move(y_import).unwrap_err());
-        auto uv_import =
-            import_plane(u32(1), planes[1].object_index, VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT);
-        if (uv_import.is_err()) return Err(rstd::move(uv_import).unwrap_err());
-
-        VkBindImagePlaneMemoryInfo y_plane_info {};
-        y_plane_info.sType       = VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
-        y_plane_info.planeAspect = VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
-        VkBindImagePlaneMemoryInfo uv_plane_info {};
-        uv_plane_info.sType       = VK_STRUCTURE_TYPE_BIND_IMAGE_PLANE_MEMORY_INFO;
-        uv_plane_info.planeAspect = VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT;
-        VkBindImageMemoryInfo bindings[2] {};
-        bindings[0].sType        = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
-        bindings[0].pNext        = &y_plane_info;
-        bindings[0].image        = *entry->image;
-        bindings[0].memory       = *plane_memories[0];
-        bindings[0].memoryOffset = 0;
-        bindings[1].sType        = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
-        bindings[1].pNext        = &uv_plane_info;
-        bindings[1].image        = *entry->image;
-        bindings[1].memory       = *plane_memories[1];
-        bindings[1].memoryOffset = 0;
-        if (const auto result = device.BindImageMemory2(
-                slice<VkBindImageMemoryInfo>::from_raw_parts(bindings, usize(2)));
-            result != VK_SUCCESS) {
-            return Err(Error { vk_error("vkBindImageMemory2(disjoint)"_str, result) });
-        }
-        entry->memories.push(rstd::move(plane_memories[0]));
-        entry->memories.push(rstd::move(plane_memories[1]));
-    } else {
-        auto imported = import_plane(u32(), planes[0].object_index, VK_IMAGE_ASPECT_COLOR_BIT);
-        if (imported.is_err()) return Err(rstd::move(imported).unwrap_err());
-        if (const auto result = entry->image.BindMemory(*plane_memories[0], 0);
-            result != VK_SUCCESS) {
-            return Err(Error { vk_error("vkBindImageMemory(joint)"_str, result) });
-        }
-        entry->memories.push(rstd::move(plane_memories[0]));
+    auto imported = import_plane(u32(), planes[0].object_index, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (imported.is_err()) return Err(rstd::move(imported).unwrap_err());
+    if (const auto result = entry->image.BindMemory(*plane_memories[0], 0);
+        result != VK_SUCCESS) {
+        return Err(Error { vk_error("vkBindImageMemory(shared)"_str, result) });
     }
+    entry->memories.push(rstd::move(plane_memories[0]));
 
     VkImageViewCreateInfo view_info {};
     view_info.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -2015,6 +2123,18 @@ auto YuvToRgba::submit_drm_prime(ConversionReservation&& reservation, DrmFrameLe
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                   VK_QUEUE_FAMILY_FOREIGN_EXT,
                   queue_family_.to_primitive());
+    if (source->split_planes) {
+        barrier_image(context->command,
+                      *source->uv_image,
+                      0,
+                      VK_ACCESS_SHADER_READ_BIT,
+                      source->initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                      VK_QUEUE_FAMILY_FOREIGN_EXT,
+                      queue_family_.to_primitive());
+    }
     if (target == ConvertTarget::BridgeForeign) {
         barrier_image(
             context->command,
@@ -2061,6 +2181,18 @@ auto YuvToRgba::submit_drm_prime(ConversionReservation&& reservation, DrmFrameLe
                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                   queue_family_.to_primitive(),
                   VK_QUEUE_FAMILY_FOREIGN_EXT);
+    if (source->split_planes) {
+        barrier_image(context->command,
+                      *source->uv_image,
+                      VK_ACCESS_SHADER_READ_BIT,
+                      0,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      VK_IMAGE_LAYOUT_GENERAL,
+                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                      queue_family_.to_primitive(),
+                      VK_QUEUE_FAMILY_FOREIGN_EXT);
+    }
     barrier_dst_from_storage(context->command, dst, target, queue_family_.to_primitive());
     if (const auto result = context->command.End(); result != VK_SUCCESS) {
         return Err(Error { vk_error("vkEndCommandBuffer(DRM)"_str, result) });
